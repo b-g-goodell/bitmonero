@@ -99,6 +99,22 @@ namespace rct {
     typedef std::vector<ctkey> ctkeyV;
     typedef std::vector<ctkeyV> ctkeyM;
 
+    //used for multisig data
+    struct multisig_kLRki {
+        key k;
+        key L;
+        key R;
+        key ki;
+    };
+
+    struct multisig_out {
+        std::vector<key> c; // for all inputs
+
+        BEGIN_SERIALIZE_OBJECT()
+          FIELD(c)
+        END_SERIALIZE()
+    };
+
     //data for passing the amount to the receiver secretly
     // If the pedersen commitment to an amount is C = aG + bH,
     // "mask" contains a 32 byte key a
@@ -450,6 +466,7 @@ inline std::ostream &operator <<(std::ostream &o, const rct::key &v) {
 BLOB_SERIALIZER(rct::key);
 BLOB_SERIALIZER(rct::key64);
 BLOB_SERIALIZER(rct::ctkey);
+BLOB_SERIALIZER(rct::multisig_kLRki);
 BLOB_SERIALIZER(rct::boroSig);
 
 VARIANT_TAG(debug_archive, rct::key, "rct::key");
@@ -464,6 +481,8 @@ VARIANT_TAG(debug_archive, rct::mgSig, "rct::mgSig");
 VARIANT_TAG(debug_archive, rct::rangeSig, "rct::rangeSig");
 VARIANT_TAG(debug_archive, rct::boroSig, "rct::boroSig");
 VARIANT_TAG(debug_archive, rct::rctSig, "rct::rctSig");
+VARIANT_TAG(debug_archive, rct::multisig_kLRki, "rct::multisig_kLRki");
+VARIANT_TAG(debug_archive, rct::multisig_out, "rct::multisig_out");
 
 VARIANT_TAG(binary_archive, rct::key, 0x90);
 VARIANT_TAG(binary_archive, rct::key64, 0x91);
@@ -477,6 +496,8 @@ VARIANT_TAG(binary_archive, rct::mgSig, 0x98);
 VARIANT_TAG(binary_archive, rct::rangeSig, 0x99);
 VARIANT_TAG(binary_archive, rct::boroSig, 0x9a);
 VARIANT_TAG(binary_archive, rct::rctSig, 0x9b);
+VARIANT_TAG(binary_archive, rct::multisig_kLRki, 0x9c);
+VARIANT_TAG(binary_archive, rct::multisig_out, 0x9d);
 
 VARIANT_TAG(json_archive, rct::key, "rct_key");
 VARIANT_TAG(json_archive, rct::key64, "rct_key64");
@@ -490,5 +511,7 @@ VARIANT_TAG(json_archive, rct::mgSig, "rct_mgSig");
 VARIANT_TAG(json_archive, rct::rangeSig, "rct_rangeSig");
 VARIANT_TAG(json_archive, rct::boroSig, "rct_boroSig");
 VARIANT_TAG(json_archive, rct::rctSig, "rct_rctSig");
+VARIANT_TAG(json_archive, rct::multisig_kLRki, "rct_multisig_kLR");
+VARIANT_TAG(json_archive, rct::multisig_out, "rct_multisig_out");
 
 #endif  /* RCTTYPES_H */
