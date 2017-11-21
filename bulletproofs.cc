@@ -1,6 +1,6 @@
 /*
-g++ -O2 -g -fPIC -DPIC -Wall -W -Wno-unused -I src -I contrib/epee/include/ -I external/easylogging++/ bulletproofs.cc build/debug/src/ringct/libringct.so build/debug/src/crypto/libcncrypto.so build/debug/src/common/libcommon.so build/debug/contrib/epee/src/libepee*.a build/debug/external/easylogging++/libeasylogging.so -lboost_system -lgmp  -lstdc++
-LD_LIBRARY_PATH=build/debug/src/ringct/:build/debug/src/crypto/:build/debug/src/common:build/debug/external/easylogging++/ ./a.out
+g++ -O2 -g -fPIC -DPIC -Wall -W -Wno-unused -I src -I contrib/epee/include/ -I external/easylogging++/ bulletproofs.cc build/debug/src/ringct/libringct.so build/debug/src/crypto/libcncrypto.so build/debug/src/common/libcommon.so build/debug/contrib/epee/src/libepee*.a build/debug/external/easylogging++/libeasylogging.so -lboost_system -lboost_thread -lgmp  -lstdc++
+LD_LIBRARY_PATH=build/debug/src/ringct/:build/debug/src/crypto/:build/debug/src/common:build/debug/external/easylogging++/ ./a.out [<ntrials>]
 */
 
 #include <stdio.h>
@@ -15,7 +15,7 @@ extern "C" {
 
 //#define DEBUG_BP
 #define trace() printf("trace: %u\n", __LINE__)
-#define PERF_TIMER_START(name) tools::PerformanceTimer *pt_##name = new tools::PerformanceTimer(#name, 1000, el::Level::Info)
+#define PERF_TIMER_START(name) tools::PerformanceTimer *pt_##name = new tools::PerformanceTimer(#name, 1000000, el::Level::Info)
 #define PERF_TIMER_END(name) do { delete pt_##name; pt_##name = NULL; } while(0)
 
     //package how.monero.hodl.ringSignature;
@@ -41,7 +41,7 @@ static constexpr size_t N = 64;
     //    private static Curve25519Point[] Gi;
     //    private static Curve25519Point[] Hi;
 static rct::key Hi[N], Gi[N];
-static ge_dsmp Hprecomp[64];
+static ge_dsmp Gprecomp[64], Hprecomp[64];
 static rct::keyV p2;
 static rct::key two()
 {
@@ -106,7 +106,7 @@ static rct::key vector_exponent(const rct::keyV &a, const rct::keyV &b)
   for (size_t i = 0; i < a.size(); ++i)
   {
     rct::key term;
-    rct::addKeys3(term, a[i], Gi[i], b[i], Hprecomp[i]);
+    rct::addKeys3(term, a[i], Gprecomp[i], b[i], Hprecomp[i]);
     rct::addKeys(res, res, term);
   }
   return res;
@@ -775,6 +775,7 @@ int main(int argc, char **argv)
     rct::precomp(Hprecomp[i], Hi[i]);
     generator = rct::addKeys(generator, generator);
     Gi[i] = rct::scalarmultBase(generator);
+    rct::precomp(Gprecomp[i], Gi[i]);
   }
 
   rct::key p2tmp = rct::identity();
