@@ -252,42 +252,25 @@ static rct::keyV vector_scalar(const rct::keyV &a, const rct::key &x)
      
     //        return inverse;
     //    }
-static std::string reverse(const std::string &s)
-{
-  std::string r;
-  for (size_t i = 0; i < s.size(); i += 2)
-    r += s.substr(s.size() - i - 2, 2);
-//MGINFO("ORG: " << s);
-//MGINFO("REV: " << r);
-  return r;
-}
 static rct::key invert(const rct::key &x)
 {
   rct::key inv;
 #warning TODO: find a better invert func ? Though it seems pretty fast anyway
 
-  std::string str;
-  str = epee::string_tools::pod_to_hex(x);
   mpz_t X;
-  mpz_init_set_str(X, reverse(str).c_str(), 16);
+  mpz_init(X);
+  mpz_import(X, sizeof(rct::key)/sizeof(mp_limb_t), -1, sizeof(mp_limb_t), -1, 0, x.bytes);
 
-  str = epee::string_tools::pod_to_hex(rct::curveOrder());
   mpz_t L;
-  mpz_init_set_str(L, reverse(str).c_str(), 16);
+  mpz_init(L);
+  mpz_import(L, sizeof(rct::key)/sizeof(mp_limb_t), -1, sizeof(mp_limb_t), -1, 0, rct::curveOrder().bytes);
 
   mpz_t minv;
   mpz_init2(minv, 256+sizeof(mp_limb_t)*8);
-  int n;
-  n = mpz_invert(minv, X, L);
-  CHECK_AND_ASSERT_THROW_MES(n, "Failed to invert");
+  CHECK_AND_ASSERT_THROW_MES(mpz_invert(minv, X, L), "Failed to invert");
 
-#warning double check mpz_get_str cannot overrun this
-  char strout[65];
-  mpz_get_str(strout, 16, minv);
-  str = strout;
-  if (str.size() < 64)
-    str = std::string(64 - str.size(), '0') + str;
-  epee::string_tools::hex_to_pod(reverse(str).c_str(), inv);
+  CHECK_AND_ASSERT_THROW_MES(mpz_size(minv) * sizeof(mp_limb_t) == sizeof(inv), "unexpected size of inverse");
+  mpz_export(inv.bytes, NULL, -1, sizeof(mp_limb_t), -1, 0, minv);
 
   mpz_clear(X);
   mpz_clear(L);
