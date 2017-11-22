@@ -738,6 +738,7 @@ static bool VERIFY(const ProofTuple &proof)
     //        N = 64;
 int main(int argc, char **argv)
 {
+  mlog_configure("bulletproofs", true);
   MGINFO("precomp");
      
     //        // Set the curve base points
