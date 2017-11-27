@@ -1,5 +1,5 @@
 /*
-g++ -O2 -g -fPIC -DPIC -Wall -W -Wno-unused -I src -I contrib/epee/include/ -I external/easylogging++/ bulletproofs.cc build/debug/src/ringct/libringct.so build/debug/src/crypto/libcncrypto.so build/debug/src/common/libcommon.so build/debug/contrib/epee/src/libepee*.a build/debug/external/easylogging++/libeasylogging.so -lboost_system -lboost_thread -lgmp  -lstdc++
+g++ -O2 -g -fPIC -DPIC -Wall -W -Wno-unused -I src -I contrib/epee/include/ -I external/easylogging++/ bulletproofs.cc build/debug/src/ringct/libringct.so build/debug/src/crypto/libcncrypto.so build/debug/src/common/libcommon.so build/debug/contrib/epee/src/libepee*.a build/debug/external/easylogging++/libeasylogging.so -lboost_filesystem -lboost_system -lboost_thread -lgmp  -lstdc++
 LD_LIBRARY_PATH=build/debug/src/ringct/:build/debug/src/crypto/:build/debug/src/common:build/debug/external/easylogging++/ ./a.out [<ntrials>]
 */
 
@@ -731,6 +731,12 @@ static bool VERIFY(const ProofTuple &proof)
   PERF_TIMER_END(VERIFY);
   return true;
 }
+
+static rct::key get_exponent(const rct::key &base, size_t idx)
+{
+  std::string hashed = std::string((const char*)base.bytes, sizeof(base)) + tools::get_varint_data(idx);
+  return rct::hashToPoint(rct::hash2rct(crypto::cn_fast_hash(hashed.data(), hashed.size())));
+}
      
     //    public static void main(String[] args)
     //    {
@@ -751,14 +757,11 @@ int main(int argc, char **argv)
     //            Gi[i] = getHpnGLookup(i);
     //            Hi[i] = getHpnGLookup(N+i);
     //        }
-  rct::key generator = rct::H;
   for (size_t i = 0; i < N; ++i)
   {
-    generator = rct::addKeys(generator, generator);
-    Hi[i] = rct::scalarmultBase(generator);
+    Hi[i] = get_exponent(rct::H, i);
     rct::precomp(Hprecomp[i], Hi[i]);
-    generator = rct::addKeys(generator, generator);
-    Gi[i] = rct::scalarmultBase(generator);
+    Gi[i] = get_exponent(rct::H, i+4096);
     rct::precomp(Gprecomp[i], Gi[i]);
   }
 
