@@ -12,6 +12,7 @@ extern "C" {
 #include "crypto/crypto-ops.h"
 }
 #include "ringct/rctOps.h"
+#include "ringct/rctSigs.h" // for borromean test
 
 //#define DEBUG_BP
 #define trace() printf("trace: %u\n", __LINE__)
@@ -713,6 +714,48 @@ static rct::key get_exponent(const rct::key &base, size_t idx)
   std::string hashed = std::string((const char*)base.bytes, sizeof(base)) + tools::get_varint_data(idx);
   return rct::hashToPoint(rct::hash2rct(crypto::cn_fast_hash(hashed.data(), hashed.size())));
 }
+
+
+static void test_borromean()
+{
+  using namespace rct;
+
+    int j = 0;
+
+        //Tests for Borromean signatures
+        //#boro true one, false one, C != sum Ci, and one out of the range..
+        int N = 64;
+        key64 xv;
+        key64 P1v;
+        key64 P2v;
+        bits indi;
+
+        for (j = 0 ; j < N ; j++) {
+            indi[j] = (int)randXmrAmount(2);
+
+            xv[j] = skGen();
+            if ( (int)indi[j] == 0 ) {
+                scalarmultBase(P1v[j], xv[j]);
+            } else {
+                addKeys1(P1v[j], xv[j], H2[j]);
+            }
+            subKeys(P2v[j], P1v[j], H2[j]);
+        }
+
+        //#true one
+        boroSig bb = genBorromean(xv, P1v, P2v, indi);
+        PERF_TIMER_START(borromean1);
+        (verifyBorromean(bb, P1v, P2v));
+        PERF_TIMER_END(borromean1);
+
+        //#true one again
+        indi[3] = (indi[3] + 1) % 2;
+        bb = genBorromean(xv, P1v, P2v, indi);
+        PERF_TIMER_START(borromean2);
+        (verifyBorromean(bb, P1v, P2v));
+        PERF_TIMER_END(borromean2);
+}
+
      
     //    public static void main(String[] args)
     //    {
@@ -798,6 +841,7 @@ int main(int argc, char **argv)
       printf("Test failed\n");
   }
 
+test_borromean();
     //} 
   MGINFO("done");
   return 0;
