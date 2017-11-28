@@ -617,6 +617,7 @@ static bool VERIFY(const ProofTuple &proof)
     winv[i] = invert(w[i]);
   PERF_TIMER_END(VERIFY_line_24_25_invert);
 
+  rct::keyV g_scalar_v(N), h_scalar_v(N);
   for (size_t i = 0; i < N; ++i)
   {
     // Convert the index to binary IN REVERSE and construct the scalar exponent
@@ -650,20 +651,24 @@ static bool VERIFY(const ProofTuple &proof)
 
     // Now compute the basepoint's scalar multiplication
     // Each of these could be written as a multiexp operation instead
-#if 0
-    rct::addKeys(inner_prod_G, inner_prod_G, rct::scalarmultKey(Gi[i], g_scalar));
-    rct::addKeys(inner_prod_H, inner_prod_H, rct::scalarmultKey(Hi[i], h_scalar));
-#else
-    rct::addKeys3(tmp, g_scalar, Gprecomp[i], rct::zero(), Hprecomp[i]);
-    rct::addKeys(inner_prod_G, inner_prod_G, tmp);
-    rct::addKeys3(tmp, rct::zero(), Gprecomp[i], h_scalar, Hprecomp[i]);
-    rct::addKeys(inner_prod_H, inner_prod_H, tmp);
-#endif
+    g_scalar_v[i] = g_scalar;
+    h_scalar_v[i] = h_scalar;
 
     sc_mul(yinvpow.bytes, yinvpow.bytes, yinv.bytes);
     sc_mul(ypow.bytes, ypow.bytes, y.bytes);
   }
   PERF_TIMER_END(VERIFY_line_24_25);
+
+  PERF_TIMER_START(VERIFY_line_24_25_ak3);
+  CHECK_AND_ASSERT_THROW_MES((N&1)==0, "N must be even");
+  for (size_t i = 0; i < N; i += 2)
+  {
+    rct::addKeys3(tmp, g_scalar_v[i], Gprecomp[i], g_scalar_v[i+1], Gprecomp[i+1]);
+    rct::addKeys(inner_prod_G, inner_prod_G, tmp);
+    rct::addKeys3(tmp, h_scalar_v[i], Hprecomp[i], h_scalar_v[i+1], Hprecomp[i+1]);
+    rct::addKeys(inner_prod_H, inner_prod_H, tmp);
+  }
+  PERF_TIMER_END(VERIFY_line_24_25_ak3);
 
   PERF_TIMER_START(VERIFY_line_26);
   // PAPER LINE 26
