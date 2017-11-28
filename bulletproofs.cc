@@ -542,7 +542,7 @@ static bool VERIFY(const ProofTuple &proof)
   rct::key ip1y = inner_product(oneN, yN);
   rct::key zsq;
   sc_mul(zsq.bytes, z.bytes, z.bytes);
-  rct::key tmp;
+  rct::key tmp, tmp2;
   sc_mul(tmp.bytes, zsq.bytes, ip1y.bytes);
   sc_sub(k.bytes, k.bytes, tmp.bytes);
   rct::key zcu;
@@ -610,7 +610,6 @@ static bool VERIFY(const ProofTuple &proof)
   rct::key inner_prod_H = rct::identity();
   const rct::key yinv = invert(y);
   rct::key yinvpow = rct::identity();
-  rct::key twopow = rct::identity();
   rct::key ypow = rct::identity();
 
   PERF_TIMER_START(VERIFY_line_24_25_invert);
@@ -649,8 +648,7 @@ static bool VERIFY(const ProofTuple &proof)
     PERF_TIMER_START(VERIFY_line_24_25_calc);
     // Adjust the scalars using the exponents from PAPER LINE 62
     sc_add(g_scalar.bytes, g_scalar.bytes, z.bytes);
-    rct::key tmp2;
-    sc_mul(tmp2.bytes, zsq.bytes, twopow.bytes);
+    sc_mul(tmp2.bytes, zsq.bytes, twoN[i].bytes);
     sc_mul(tmp.bytes, z.bytes, ypow.bytes);
     sc_add(tmp.bytes, tmp.bytes, tmp2.bytes);
     sc_mul(tmp.bytes, tmp.bytes, yinvpow.bytes);
@@ -673,7 +671,6 @@ static bool VERIFY(const ProofTuple &proof)
 
     PERF_TIMER_START(VERIFY_line_24_25_exp);
     sc_mul(yinvpow.bytes, yinvpow.bytes, yinv.bytes);
-    sc_mul(twopow.bytes, twopow.bytes, two().bytes);
     sc_mul(ypow.bytes, ypow.bytes, y.bytes);
     PERF_TIMER_END(VERIFY_line_24_25_exp);
   }
@@ -688,10 +685,17 @@ static bool VERIFY(const ProofTuple &proof)
   for (size_t i = 0; i < rounds; ++i)
   {
     sc_mul(tmp.bytes, w[i].bytes, w[i].bytes);
+    sc_mul(tmp2.bytes, winv[i].bytes, winv[i].bytes);
+#if 1
+    ge_dsmp cacheL, cacheR;
+    rct::precomp(cacheL, proof.L[i]);
+    rct::precomp(cacheR, proof.R[i]);
+    rct::addKeys3(tmp, tmp, cacheL, tmp2, cacheR);
+    rct::addKeys(pprime, pprime, tmp);
+#else
     rct::addKeys(pprime, pprime, rct::scalarmultKey(proof.L[i], tmp));
-    rct::key wiinv = invert(w[i]);
-    sc_mul(tmp.bytes, wiinv.bytes, wiinv.bytes);
-    rct::addKeys(pprime, pprime, rct::scalarmultKey(proof.R[i], tmp));
+    rct::addKeys(pprime, pprime, rct::scalarmultKey(proof.R[i], tmp2));
+#endif
   }
   sc_mul(tmp.bytes, proof.t.bytes, x_ip.bytes);
   rct::addKeys(pprime, pprime, rct::scalarmultBase(tmp));
