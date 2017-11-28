@@ -612,31 +612,41 @@ static bool VERIFY(const ProofTuple &proof)
   rct::key yinvpow = rct::identity();
   rct::key twopow = rct::identity();
   rct::key ypow = rct::identity();
+
+  PERF_TIMER_START(VERIFY_line_24_25_invert);
+  rct::keyV winv(rounds);
+  for (size_t i = 0; i < rounds; ++i)
+    winv[i] = invert(w[i]);
+  PERF_TIMER_END(VERIFY_line_24_25_invert);
+
   for (size_t i = 0; i < N; ++i)
   {
+    PERF_TIMER_START(VERIFY_line_24_25_init);
     // Convert the index to binary IN REVERSE and construct the scalar exponent
-    size_t idx = i;
     rct::key g_scalar = proof.a;
     rct::key h_scalar;
     sc_mul(h_scalar.bytes, proof.b.bytes, yinvpow.bytes);
+    PERF_TIMER_END(VERIFY_line_24_25_init);
 
+    PERF_TIMER_START(VERIFY_line_24_25_loop);
     for (size_t j = rounds; j-- > 0; )
     {
       size_t J = w.size() - j - 1;
-      size_t basePow = 1<<j;
-      if (idx / basePow == 0)
+
+      if ((i & (((size_t)1)<<j)) == 0)
       {
-        sc_mul(g_scalar.bytes, g_scalar.bytes, invert(w[J]).bytes);
+        sc_mul(g_scalar.bytes, g_scalar.bytes, winv[J].bytes);
         sc_mul(h_scalar.bytes, h_scalar.bytes, w[J].bytes);
       }
       else
       {
         sc_mul(g_scalar.bytes, g_scalar.bytes, w[J].bytes);
-        sc_mul(h_scalar.bytes, h_scalar.bytes, invert(w[J]).bytes);
-        idx -= basePow;
+        sc_mul(h_scalar.bytes, h_scalar.bytes, winv[J].bytes);
       }
     }
+    PERF_TIMER_END(VERIFY_line_24_25_loop);
 
+    PERF_TIMER_START(VERIFY_line_24_25_calc);
     // Adjust the scalars using the exponents from PAPER LINE 62
     sc_add(g_scalar.bytes, g_scalar.bytes, z.bytes);
     rct::key tmp2;
@@ -645,15 +655,27 @@ static bool VERIFY(const ProofTuple &proof)
     sc_add(tmp.bytes, tmp.bytes, tmp2.bytes);
     sc_mul(tmp.bytes, tmp.bytes, yinvpow.bytes);
     sc_sub(h_scalar.bytes, h_scalar.bytes, tmp.bytes);
+    PERF_TIMER_END(VERIFY_line_24_25_calc);
 
+    PERF_TIMER_START(VERIFY_line_24_25_addkeys);
     // Now compute the basepoint's scalar multiplication
     // Each of these could be written as a multiexp operation instead
+#if 0
     rct::addKeys(inner_prod_G, inner_prod_G, rct::scalarmultKey(Gi[i], g_scalar));
     rct::addKeys(inner_prod_H, inner_prod_H, rct::scalarmultKey(Hi[i], h_scalar));
+#else
+    rct::addKeys3(tmp, g_scalar, Gprecomp[i], rct::zero(), Hprecomp[i]);
+    rct::addKeys(inner_prod_G, inner_prod_G, tmp);
+    rct::addKeys3(tmp, rct::zero(), Gprecomp[i], h_scalar, Hprecomp[i]);
+    rct::addKeys(inner_prod_H, inner_prod_H, tmp);
+#endif
+    PERF_TIMER_END(VERIFY_line_24_25_addkeys);
 
+    PERF_TIMER_START(VERIFY_line_24_25_exp);
     sc_mul(yinvpow.bytes, yinvpow.bytes, yinv.bytes);
     sc_mul(twopow.bytes, twopow.bytes, two().bytes);
     sc_mul(ypow.bytes, ypow.bytes, y.bytes);
+    PERF_TIMER_END(VERIFY_line_24_25_exp);
   }
   PERF_TIMER_END(VERIFY_line_24_25);
 
