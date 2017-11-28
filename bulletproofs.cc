@@ -68,8 +68,34 @@ static rct::key vector_exponent_custom(const rct::keyV &A, const rct::keyV &B, c
   rct::key res = rct::identity();
   for (size_t i = 0; i < a.size(); ++i)
   {
-    rct::addKeys(res, res, rct::scalarmultKey(A[i], a[i]));
-    rct::addKeys(res, res, rct::scalarmultKey(B[i], b[i]));
+    rct::key term;
+#if 1
+    // we happen to know where A and B might fall, so don't bother checking the rest
+    ge_dsmp *Acache = NULL, *Bcache = NULL;
+    ge_dsmp Acache_custom[1], Bcache_custom[1];
+    if (Gi[i] == A[i])
+      Acache = Gprecomp + i;
+    else if (i<32 && Gi[i+32] == A[i])
+      Acache = Gprecomp + i + 32;
+    else
+    {
+      rct::precomp(Acache_custom[0], A[i]);
+      Acache = Acache_custom;
+    }
+    if (i == 0 && B[i] == Hi[0])
+      Bcache = Hprecomp;
+    else
+    {
+      rct::precomp(Bcache_custom[0], B[i]);
+      Bcache = Bcache_custom;
+    }
+    rct::addKeys3(term, a[i], *Acache, b[i], *Bcache);
+#else
+    ge_dsmp Acache, Bcache;
+    rct::precomp(Bcache, B[i]);
+    rct::addKeys3(term, a[i], A[i], b[i], Bcache);
+#endif
+    rct::addKeys(res, res, term);
   }
   return res;
 }
@@ -226,10 +252,13 @@ static rct::keyV slice(const rct::keyV &a, size_t start, size_t stop)
 /* Given a value v (0..2^N-1) and a mask gamma, construct a range proof */
 static ProofTuple PROVE(uint64_t v, const rct::key &gamma)
 {
+  PERF_TIMER_UNIT(PROVE, 1000000);
+
   rct::key V;
   rct::keyV aL(N), aR(N);
 
   // vG + gammaH
+  PERF_TIMER_START(PROVE_v);
   rct::key sv = rct::zero();
   sv.bytes[0] = v & 255;
   sv.bytes[1] = (v >> 8) & 255;
@@ -240,6 +269,7 @@ static ProofTuple PROVE(uint64_t v, const rct::key &gamma)
   sv.bytes[6] = (v >> 48) & 255;
   sv.bytes[7] = (v >> 56) & 255;
   rct::addKeys2(V, sv, gamma, rct::H);
+  PERF_TIMER_END(PROVE_v);
      
     //        BigInteger tempV = v.toBigInteger();
     //        for (int i = N-1; i >= 0; i--)
@@ -274,6 +304,7 @@ static ProofTuple PROVE(uint64_t v, const rct::key &gamma)
   }
 #endif
 
+  PERF_TIMER_START(PROVE_aLaR);
   for (size_t i = N; i-- > 0; )
   {
     if (v & (((uint64_t)1)<<i))
@@ -286,6 +317,7 @@ static ProofTuple PROVE(uint64_t v, const rct::key &gamma)
     }
     sc_sub(aR[i].bytes, aL[i].bytes, rct::identity().bytes);
   }
+  PERF_TIMER_END(PROVE_aLaR);
 
      
   // DEBUG: Test to ensure this recovers the value
@@ -302,6 +334,7 @@ static ProofTuple PROVE(uint64_t v, const rct::key &gamma)
   CHECK_AND_ASSERT_THROW_MES(test_aR == v, "test_aR failed");
 #endif
      
+  PERF_TIMER_START(PROVE_step1);
   // PAPER LINES 38-39
   rct::key alpha = rct::skGen();
   rct::key ve = vector_exponent(aL, aR);
@@ -366,7 +399,9 @@ static ProofTuple PROVE(uint64_t v, const rct::key &gamma)
   sc_add(test_t0.bytes, test_t0.bytes, k.bytes);
   CHECK_AND_ASSERT_THROW_MES(t0 == test_t0, "t0 check failed");
 #endif
+  PERF_TIMER_END(PROVE_step1);
      
+  PERF_TIMER_START(PROVE_step2);
   const auto HyNsR = hadamard(yN, sR);
   const auto vpIz = vector_scalar(oneN, z);
 
@@ -408,7 +443,9 @@ static ProofTuple PROVE(uint64_t v, const rct::key &gamma)
   // PAPER LINES 54-57
   rct::keyV l = vector_add(vector_subtract(aL, vpIz), vector_scalar(sL, x));
   rct::keyV r = vector_add(hadamard(yN, vector_add(aR, vector_add(vpIz, vector_scalar(sR, x)))), vector_scalar(twoN, zsq));
+  PERF_TIMER_END(PROVE_step2);
      
+  PERF_TIMER_START(PROVE_step3);
   rct::key t = inner_product(l, r);
 
   // DEBUG: Test if the l and r vectors match the polynomial forms
@@ -450,7 +487,9 @@ static ProofTuple PROVE(uint64_t v, const rct::key &gamma)
   rct::keyV R(logN);
   int round = 0;
   rct::keyV w(logN); // this is the challenge x in the inner product protocol
+  PERF_TIMER_END(PROVE_step3);
 
+  PERF_TIMER_START(PROVE_step4);
   // PAPER LINE 13
   while (nprime > 1)
   {
@@ -495,6 +534,7 @@ static ProofTuple PROVE(uint64_t v, const rct::key &gamma)
 
     ++round;
   }
+  PERF_TIMER_END(PROVE_step4);
 
   // PAPER LINE 58 (with inclusions from PAPER LINE 8 and PAPER LINE 20)
   return ProofTuple(V, A, S, T1, T2, taux, mu, L, R, aprime[0], bprime[0], t);
