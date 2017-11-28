@@ -577,9 +577,7 @@ static bool VERIFY(const ProofTuple &proof)
      
   PERF_TIMER_START(VERIFY_line_62);
   // PAPER LINE 62
-  rct::key P = rct::identity();
-  rct::addKeys(P, P, proof.A);
-  rct::addKeys(P, P, rct::scalarmultKey(proof.S, x));
+  rct::key P = rct::addKeys(proof.A, rct::scalarmultKey(proof.S, x));
   PERF_TIMER_END(VERIFY_line_62);
 
   // Compute the number of rounds for the inner product
