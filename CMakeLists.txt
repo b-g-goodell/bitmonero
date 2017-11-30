@@ -731,6 +731,11 @@ if(SODIUM_LIBRARY)
   set(ZMQ_LIB "${ZMQ_LIB};${SODIUM_LIBRARY}")
 endif()
 
+find_package(GMP)
+if(NOT GMP_FOUND)
+  message(FATAL_ERROR "Could not find the GNU multiprecision library (libgmp)")
+endif()
+
 add_subdirectory(contrib)
 add_subdirectory(src)
 
