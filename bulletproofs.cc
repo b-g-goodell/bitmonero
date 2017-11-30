@@ -760,9 +760,9 @@ int main(int argc, char **argv)
      
   for (size_t i = 0; i < N; ++i)
   {
-    Hi[i] = get_exponent(rct::H, i);
+    Hi[i] = get_exponent(rct::H, i * 2);
     rct::precomp(Hprecomp[i], Hi[i]);
-    Gi[i] = get_exponent(rct::H, i+4096);
+    Gi[i] = get_exponent(rct::H, i * 2 + 1);
     rct::precomp(Gprecomp[i], Gi[i]);
   }
 
