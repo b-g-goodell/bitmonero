@@ -139,9 +139,7 @@ static rct::key inner_product(const rct::keyV &a, const rct::keyV &b)
   rct::key res = rct::zero();
   for (size_t i = 0; i < a.size(); ++i)
   {
-    rct::key m;
-    sc_mul(m.bytes, a[i].bytes, b[i].bytes);
-    sc_add(res.bytes, res.bytes, m.bytes);
+    sc_muladd(res.bytes, a[i].bytes, b[i].bytes, res.bytes);
   }
   return res;
 }
@@ -347,23 +345,19 @@ static ProofTuple PROVE(uint64_t v, const rct::key &gamma)
 
   rct::key ip1y = inner_product(oneN, yN);
   rct::key tmp;
-  sc_mul(tmp.bytes, z.bytes, ip1y.bytes);
-  sc_add(t0.bytes, t0.bytes, tmp.bytes);
+  sc_muladd(t0.bytes, z.bytes, ip1y.bytes, t0.bytes);
 
   rct::key zsq;
   sc_mul(zsq.bytes, z.bytes, z.bytes);
-  sc_mul(tmp.bytes, zsq.bytes, sv.bytes);
-  sc_add(t0.bytes, t0.bytes, tmp.bytes);
+  sc_muladd(t0.bytes, zsq.bytes, sv.bytes, t0.bytes);
 
   rct::key k = rct::zero();
-  sc_mul(tmp.bytes, zsq.bytes, ip1y.bytes);
-  sc_sub(k.bytes, k.bytes, tmp.bytes);
+  sc_mulsub(k.bytes, zsq.bytes, ip1y.bytes, k.bytes);
 
   rct::key zcu;
   sc_mul(zcu.bytes, zsq.bytes, z.bytes);
   static const rct::key ip12 = inner_product(oneN, twoN);
-  sc_mul(tmp.bytes, zcu.bytes, ip12.bytes);
-  sc_sub(k.bytes, k.bytes, tmp.bytes);
+  sc_mulsub(k.bytes, zcu.bytes, ip12.bytes, k.bytes);
   sc_add(t0.bytes, t0.bytes, k.bytes);
 
   // DEBUG: Test the value of t0 has the correct form
@@ -372,11 +366,9 @@ static ProofTuple PROVE(uint64_t v, const rct::key &gamma)
   rct::key iph = inner_product(aL, hadamard(aR, yN));
   sc_add(test_t0.bytes, test_t0.bytes, iph.bytes);
   rct::key ips = inner_product(vector_subtract(aL, aR), yN);
-  sc_mul(tmp.bytes, z.bytes, ips.bytes);
-  sc_add(test_t0.bytes, test_t0.bytes, tmp.bytes);
+  sc_muladd(test_t0.bytes, z.bytes, ips.bytes, test_t0.bytes);
   rct::key ipt = inner_product(twoN, aL);
-  sc_mul(tmp.bytes, zsq.bytes, ipt.bytes);
-  sc_add(test_t0.bytes, test_t0.bytes, tmp.bytes);
+  sc_muladd(test_t0.bytes, zsq.bytes, ipt.bytes, test_t0.bytes);
   sc_add(test_t0.bytes, test_t0.bytes, k.bytes);
   CHECK_AND_ASSERT_THROW_MES(t0 == test_t0, "t0 check failed");
 #endif
@@ -413,13 +405,10 @@ static ProofTuple PROVE(uint64_t v, const rct::key &gamma)
   sc_mul(taux.bytes, tau1.bytes, x.bytes);
   rct::key xsq;
   sc_mul(xsq.bytes, x.bytes, x.bytes);
-  sc_mul(tmp.bytes, tau2.bytes, xsq.bytes);
-  sc_add(taux.bytes, taux.bytes, tmp.bytes);
-  sc_mul(tmp.bytes, gamma.bytes, zsq.bytes);
-  sc_add(taux.bytes, taux.bytes, tmp.bytes);
+  sc_muladd(taux.bytes, tau2.bytes, xsq.bytes, taux.bytes);
+  sc_muladd(taux.bytes, gamma.bytes, zsq.bytes, taux.bytes);
   rct::key mu;
-  sc_mul(tmp.bytes, x.bytes, rho.bytes);
-  sc_add(mu.bytes, tmp.bytes, alpha.bytes);
+  sc_muladd(mu.bytes, x.bytes, rho.bytes, alpha.bytes);
      
   // PAPER LINES 54-57
   rct::keyV l = vector_add(vector_subtract(aL, vpIz), vector_scalar(sL, x));
@@ -431,12 +420,9 @@ static ProofTuple PROVE(uint64_t v, const rct::key &gamma)
 
   // DEBUG: Test if the l and r vectors match the polynomial forms
 #ifdef DEBUG_BP
-  rct::key test_t = rct::zero();
-  sc_mul(tmp.bytes, t1.bytes, x.bytes);
-  sc_add(tmp.bytes, tmp.bytes, t0.bytes);
-  sc_add(test_t.bytes, test_t.bytes, tmp.bytes);
-  sc_mul(tmp.bytes, t2.bytes, xsq.bytes);
-  sc_add(test_t.bytes, test_t.bytes, tmp.bytes);
+  rct::key test_t;
+  sc_muladd(test_t.bytes, t1.bytes, x.bytes, t0.bytes);
+  sc_muladd(test_t.bytes, t2.bytes, xsq.bytes, test_t.bytes);
   CHECK_AND_ASSERT_THROW_MES(test_t == t, "test_t check failed");
 #endif
 
@@ -566,17 +552,14 @@ static bool VERIFY(const ProofTuple &proof)
   rct::key zsq;
   sc_mul(zsq.bytes, z.bytes, z.bytes);
   rct::key tmp, tmp2;
-  sc_mul(tmp.bytes, zsq.bytes, ip1y.bytes);
-  sc_sub(k.bytes, k.bytes, tmp.bytes);
+  sc_mulsub(k.bytes, zsq.bytes, ip1y.bytes, k.bytes);
   rct::key zcu;
   sc_mul(zcu.bytes, zsq.bytes, z.bytes);
-  sc_mul(tmp.bytes, zcu.bytes, ip12.bytes);
-  sc_sub(k.bytes, k.bytes, tmp.bytes);
+  sc_mulsub(k.bytes, zcu.bytes, ip12.bytes, k.bytes);
   PERF_TIMER_END(VERIFY_line_61);
      
   PERF_TIMER_START(VERIFY_line_61rl);
-  sc_mul(tmp.bytes, z.bytes, ip1y.bytes);
-  sc_add(tmp.bytes, k.bytes, tmp.bytes);
+  sc_muladd(tmp.bytes, z.bytes, ip1y.bytes, k.bytes);
   rct::key L61Right = rct::scalarmultBase(tmp);
 
   tmp = rct::scalarmultKey(proof.V, zsq);
@@ -666,10 +649,8 @@ static bool VERIFY(const ProofTuple &proof)
     // Adjust the scalars using the exponents from PAPER LINE 62
     sc_add(g_scalar.bytes, g_scalar.bytes, z.bytes);
     sc_mul(tmp2.bytes, zsq.bytes, twoN[i].bytes);
-    sc_mul(tmp.bytes, z.bytes, ypow.bytes);
-    sc_add(tmp.bytes, tmp.bytes, tmp2.bytes);
-    sc_mul(tmp.bytes, tmp.bytes, yinvpow.bytes);
-    sc_sub(h_scalar.bytes, h_scalar.bytes, tmp.bytes);
+    sc_muladd(tmp.bytes, z.bytes, ypow.bytes, tmp2.bytes);
+    sc_mulsub(h_scalar.bytes, tmp.bytes, yinvpow.bytes, h_scalar.bytes);
 
     g_scalar_v[i] = g_scalar;
     h_scalar_v[i] = h_scalar;
