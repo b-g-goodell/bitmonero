@@ -41,6 +41,21 @@ struct ProofTuple
   ProofTuple() {}
   ProofTuple(const rct::key &V, const rct::key &A, const rct::key &S, const rct::key &T1, const rct::key &T2, const rct::key &taux, const rct::key &mu, const rct::keyV &L, const rct::keyV &R, const rct::key &a, const rct::key &b, const rct::key &t):
     V(V), A(A), S(S), T1(T1), T2(T2), taux(taux), mu(mu), L(L), R(R), a(a), b(b), t(t) {}
+
+  BEGIN_SERIALIZE_OBJECT()
+    FIELD(V)
+    FIELD(A)
+    FIELD(S)
+    FIELD(T1)
+    FIELD(T2)
+    FIELD(taux)
+    FIELD(mu)
+    FIELD(L)
+    FIELD(R)
+    FIELD(a)
+    FIELD(b)
+    FIELD(t)
+  END_SERIALIZE()
 };
      
 /* Given two scalar arrays, construct a vector commitment */
@@ -69,7 +84,7 @@ static rct::key vector_exponent_custom(const rct::keyV &A, const rct::keyV &B, c
   for (size_t i = 0; i < a.size(); ++i)
   {
     rct::key term;
-#if 1
+#if 0
     // we happen to know where A and B might fall, so don't bother checking the rest
     ge_dsmp *Acache = NULL, *Bcache = NULL;
     ge_dsmp Acache_custom[1], Bcache_custom[1];
@@ -155,7 +170,6 @@ static rct::keyV hadamard2(const rct::keyV &a, const rct::keyV &b)
   return res;
 }
 
-     
 /* Add two vectors */
 static rct::keyV vector_add(const rct::keyV &a, const rct::keyV &b)
 {
@@ -241,7 +255,7 @@ static rct::keyV slice(const rct::keyV &a, size_t start, size_t stop)
   CHECK_AND_ASSERT_THROW_MES(start < a.size(), "Invalid start index");
   CHECK_AND_ASSERT_THROW_MES(stop <= a.size(), "Invalid stop index");
   CHECK_AND_ASSERT_THROW_MES(start < stop, "Invalid start/stop indices");
-  rct::keyV res(a.size());
+  rct::keyV res(stop - start);
   for (size_t i = start; i < stop; ++i)
   {
     res[i - start] = a[i];
@@ -271,39 +285,6 @@ static ProofTuple PROVE(uint64_t v, const rct::key &gamma)
   rct::addKeys2(V, sv, gamma, rct::H);
   PERF_TIMER_END(PROVE_v);
      
-    //        BigInteger tempV = v.toBigInteger();
-    //        for (int i = N-1; i >= 0; i--)
-    //        {
-    //            BigInteger basePow = BigInteger.valueOf(2).pow(i);
-    //            if (tempV.divide(basePow).equals(BigInteger.ZERO))
-    //            {
-    //                aL[i] = Scalar.ZERO;
-    //            }
-    //            else
-    //            {
-    //                aL[i] = Scalar.ONE;
-    //                tempV = tempV.subtract(basePow);
-    //            }
-    //            aR[i] = aL[i].sub(Scalar.ONE);
-    //        }
-#if 0
-  uint64_t tempV = v;
-  for (size_t i = N; i-- > 0; )
-  {
-    //MGINFO("try1("<<v<<"): "<< i << ": " << (tempV / (((uint64_t)1)<<i) ));
-    if (tempV / (((uint64_t)1)<<i) == 0) // TODO: replace with &
-    {
-      aL[i] = rct::zero();
-    }
-    else
-    {
-      aL[i] = rct::identity();
-      tempV -= ((uint64_t)1) << i;
-    }
-    sc_sub(aR[i].bytes, aL[i].bytes, rct::identity().bytes);
-  }
-#endif
-
   PERF_TIMER_START(PROVE_aLaR);
   for (size_t i = N; i-- > 0; )
   {
@@ -525,12 +506,13 @@ static ProofTuple PROVE(uint64_t v, const rct::key &gamma)
     }
 
     // PAPER LINES 24-25
-    Gprime = hadamard2(vector_scalar2(slice(Gprime, 0, nprime), invert(w[round])), vector_scalar2(slice(Gprime, nprime, Gprime.size()), w[round]));
-    Hprime = hadamard2(vector_scalar2(slice(Hprime, 0, nprime), w[round]), vector_scalar2(slice(Hprime, nprime, Hprime.size()), invert(w[round])));
+    const rct::key winv = invert(w[round]);
+    Gprime = hadamard2(vector_scalar2(slice(Gprime, 0, nprime), winv), vector_scalar2(slice(Gprime, nprime, Gprime.size()), w[round]));
+    Hprime = hadamard2(vector_scalar2(slice(Hprime, 0, nprime), w[round]), vector_scalar2(slice(Hprime, nprime, Hprime.size()), winv));
 
     // PAPER LINES 28-29
-    aprime = vector_add(vector_scalar(slice(aprime, 0, nprime), w[round]), vector_scalar(slice(aprime, nprime, aprime.size()), invert(w[round])));
-    bprime = vector_add(vector_scalar(slice(bprime, 0, nprime), invert(w[round])), vector_scalar(slice(bprime, nprime, bprime.size()), w[round]));
+    aprime = vector_add(vector_scalar(slice(aprime, 0, nprime), w[round]), vector_scalar(slice(aprime, nprime, aprime.size()), winv));
+    bprime = vector_add(vector_scalar(slice(bprime, 0, nprime), winv), vector_scalar(slice(bprime, nprime, bprime.size()), w[round]));
 
     ++round;
   }
@@ -689,8 +671,6 @@ static bool VERIFY(const ProofTuple &proof)
     sc_mul(tmp.bytes, tmp.bytes, yinvpow.bytes);
     sc_sub(h_scalar.bytes, h_scalar.bytes, tmp.bytes);
 
-    // Now compute the basepoint's scalar multiplication
-    // Each of these could be written as a multiexp operation instead
     g_scalar_v[i] = g_scalar;
     h_scalar_v[i] = h_scalar;
 
@@ -700,6 +680,8 @@ static bool VERIFY(const ProofTuple &proof)
   PERF_TIMER_END(VERIFY_line_24_25);
 
   PERF_TIMER_START(VERIFY_line_24_25_ak3);
+  // Now compute the basepoint's scalar multiplication
+  // Each of these could be written as a multiexp operation instead
   CHECK_AND_ASSERT_THROW_MES((N&1)==0, "N must be even");
   for (size_t i = 0; i < N; i += 2)
   {
@@ -763,62 +745,38 @@ static void test_borromean()
 {
   using namespace rct;
 
-    int j = 0;
+  //Tests for Borromean signatures
+  //#boro true one, false one, C != sum Ci, and one out of the range..
+  key64 xv;
+  key64 P1v;
+  key64 P2v;
+  bits indi;
 
-        //Tests for Borromean signatures
-        //#boro true one, false one, C != sum Ci, and one out of the range..
-        int N = 64;
-        key64 xv;
-        key64 P1v;
-        key64 P2v;
-        bits indi;
+  for (size_t j = 0 ; j < N ; j++) {
+    indi[j] = (int)randXmrAmount(2);
 
-        for (j = 0 ; j < N ; j++) {
-            indi[j] = (int)randXmrAmount(2);
+    xv[j] = skGen();
+    if ( (int)indi[j] == 0 ) {
+      scalarmultBase(P1v[j], xv[j]);
+    } else {
+      addKeys1(P1v[j], xv[j], H2[j]);
+    }
+    subKeys(P2v[j], P1v[j], H2[j]);
+  }
 
-            xv[j] = skGen();
-            if ( (int)indi[j] == 0 ) {
-                scalarmultBase(P1v[j], xv[j]);
-            } else {
-                addKeys1(P1v[j], xv[j], H2[j]);
-            }
-            subKeys(P2v[j], P1v[j], H2[j]);
-        }
-
-        //#true one
-        boroSig bb = genBorromean(xv, P1v, P2v, indi);
-        PERF_TIMER_START(borromean1);
-        (verifyBorromean(bb, P1v, P2v));
-        PERF_TIMER_END(borromean1);
-
-        //#true one again
-        indi[3] = (indi[3] + 1) % 2;
-        bb = genBorromean(xv, P1v, P2v, indi);
-        PERF_TIMER_START(borromean2);
-        (verifyBorromean(bb, P1v, P2v));
-        PERF_TIMER_END(borromean2);
+  //#true one
+  boroSig bb = genBorromean(xv, P1v, P2v, indi);
+  PERF_TIMER_START(borromean);
+  (verifyBorromean(bb, P1v, P2v));
+  PERF_TIMER_END(borromean);
 }
 
      
-    //    public static void main(String[] args)
-    //    {
-    //        // Number of bits in the range
-    //        N = 64;
 int main(int argc, char **argv)
 {
   mlog_configure("bulletproofs", true);
   MGINFO("precomp");
      
-    //        // Set the curve base points
-    //        G = Curve25519Point.G;
-    //        H = Curve25519Point.hashToPoint(G);
-    //        Gi = new Curve25519Point[N];
-    //        Hi = new Curve25519Point[N];
-    //        for (int i = 0; i < N; i++)
-    //        {
-    //            Gi[i] = getHpnGLookup(i);
-    //            Hi[i] = getHpnGLookup(N+i);
-    //        }
   for (size_t i = 0; i < N; ++i)
   {
     Hi[i] = get_exponent(rct::H, i);
@@ -827,39 +785,6 @@ int main(int argc, char **argv)
     rct::precomp(Gprecomp[i], Gi[i]);
   }
 
-  rct::key p2tmp = rct::identity();
-  for (size_t i = 0; i < N; ++i)
-  {
-    p2.push_back(p2tmp);
-    if (i != N-1)
-      sc_mul(p2tmp.bytes, p2tmp.bytes, two().bytes);
-  }
-
-  //rct::key M, I = rct::identity();
-  //sc_mul(M.bytes, I.bytes, I.bytes);
-  //MGINFO("I*I: " << M);
-
-  //rct::key hinv = invert(rct::skGen());
-  //rct::key hinv = invert(rct::identity());
-
-    //        // Run a bunch of randomized trials
-    //        Random rando = new Random();
-    //        int TRIALS = 250;
-    //        int count = 0;
-     
-    //        while (count < TRIALS)
-    //        {
-    //            long amount = rando.nextLong();
-    //            if (amount > Math.pow(2,N)-1 || amount < 0)
-    //                continue;
-     
-    //            ProofTuple proof = PROVE(new Scalar(BigInteger.valueOf(amount)),randomScalar());
-    //            if (!VERIFY(proof))
-    //                System.out.println("Test failed");
-     
-    //            count += 1;
-    //        }
-    //    }
   int TRIALS = 250;
   if (argc > 1)
   {
@@ -884,8 +809,8 @@ int main(int argc, char **argv)
       printf("Test failed\n");
   }
 
-test_borromean();
-    //} 
+  test_borromean();
+
   MGINFO("done");
   return 0;
 }
