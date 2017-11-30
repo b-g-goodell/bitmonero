@@ -610,8 +610,7 @@ static bool VERIFY(const ProofTuple &proof)
   PERF_TIMER_START(VERIFY_line_24_25);
   // Basically PAPER LINES 24-25
   // Compute the curvepoints from G[i] and H[i]
-  rct::key inner_prod_G = rct::identity();
-  rct::key inner_prod_H = rct::identity();
+  rct::key inner_prod = rct::identity();
   rct::key yinvpow = rct::identity();
   rct::key ypow = rct::identity();
 
@@ -622,7 +621,6 @@ static bool VERIFY(const ProofTuple &proof)
     winv[i] = invert(w[i]);
   PERF_TIMER_END(VERIFY_line_24_25_invert);
 
-  rct::keyV g_scalar_v(N), h_scalar_v(N);
   for (size_t i = 0; i < N; ++i)
   {
     // Convert the index to binary IN REVERSE and construct the scalar exponent
@@ -652,26 +650,15 @@ static bool VERIFY(const ProofTuple &proof)
     sc_muladd(tmp.bytes, z.bytes, ypow.bytes, tmp.bytes);
     sc_mulsub(h_scalar.bytes, tmp.bytes, yinvpow.bytes, h_scalar.bytes);
 
-    g_scalar_v[i] = g_scalar;
-    h_scalar_v[i] = h_scalar;
+    // Now compute the basepoint's scalar multiplication
+    // Each of these could be written as a multiexp operation instead
+    rct::addKeys3(tmp, g_scalar, Gprecomp[i], h_scalar, Hprecomp[i]);
+    rct::addKeys(inner_prod, inner_prod, tmp);
 
     sc_mul(yinvpow.bytes, yinvpow.bytes, yinv.bytes);
     sc_mul(ypow.bytes, ypow.bytes, y.bytes);
   }
   PERF_TIMER_END(VERIFY_line_24_25);
-
-  PERF_TIMER_START(VERIFY_line_24_25_ak3);
-  // Now compute the basepoint's scalar multiplication
-  // Each of these could be written as a multiexp operation instead
-  CHECK_AND_ASSERT_THROW_MES((N&1)==0, "N must be even");
-  for (size_t i = 0; i < N; i += 2)
-  {
-    rct::addKeys3(tmp, g_scalar_v[i], Gprecomp[i], g_scalar_v[i+1], Gprecomp[i+1]);
-    rct::addKeys(inner_prod_G, inner_prod_G, tmp);
-    rct::addKeys3(tmp, h_scalar_v[i], Hprecomp[i], h_scalar_v[i+1], Hprecomp[i+1]);
-    rct::addKeys(inner_prod_H, inner_prod_H, tmp);
-  }
-  PERF_TIMER_END(VERIFY_line_24_25_ak3);
 
   PERF_TIMER_START(VERIFY_line_26);
   // PAPER LINE 26
@@ -702,8 +689,7 @@ static bool VERIFY(const ProofTuple &proof)
   sc_mul(tmp.bytes, proof.a.bytes, proof.b.bytes);
   sc_mul(tmp.bytes, tmp.bytes, x_ip.bytes);
   tmp = rct::scalarmultBase(tmp);
-  rct::addKeys(tmp, tmp, inner_prod_G);
-  rct::addKeys(tmp, tmp, inner_prod_H);
+  rct::addKeys(tmp, tmp, inner_prod);
   PERF_TIMER_END(VERIFY_step2_check);
   if (!(pprime == tmp))
   {
