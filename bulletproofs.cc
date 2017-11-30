@@ -648,8 +648,8 @@ static bool VERIFY(const ProofTuple &proof)
 
     // Adjust the scalars using the exponents from PAPER LINE 62
     sc_add(g_scalar.bytes, g_scalar.bytes, z.bytes);
-    sc_mul(tmp2.bytes, zsq.bytes, twoN[i].bytes);
-    sc_muladd(tmp.bytes, z.bytes, ypow.bytes, tmp2.bytes);
+    sc_mul(tmp.bytes, zsq.bytes, twoN[i].bytes);
+    sc_muladd(tmp.bytes, z.bytes, ypow.bytes, tmp.bytes);
     sc_mulsub(h_scalar.bytes, tmp.bytes, yinvpow.bytes, h_scalar.bytes);
 
     g_scalar_v[i] = g_scalar;
