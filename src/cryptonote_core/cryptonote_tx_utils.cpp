@@ -461,7 +461,7 @@ namespace cryptonote
 
       // the non-simple version is slightly smaller, but assumes all real inputs
       // are on the same index, so can only be used if there just one ring.
-      bool use_simple_rct = sources.size() > 1;
+      bool use_simple_rct = sources.size() > 1 || bulletproof;
 
       if (!use_simple_rct)
       {

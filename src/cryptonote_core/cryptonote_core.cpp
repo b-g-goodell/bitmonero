@@ -617,14 +617,36 @@ namespace cryptonote
     if (tx.version >= 2)
     {
       rct::rctSig &rv = tx.rct_signatures;
-      if (rv.outPk.size() != tx.vout.size())
+      const bool bulletproof = rv.type == rct::RCTTypeFullBulletproof || rv.type == rct::RCTTypeSimpleBulletproof;
+      if (rv.outPk.size() != (bulletproof ? 0 : tx.vout.size()))
       {
         LOG_PRINT_L1("WRONG TRANSACTION BLOB, Bad outPk size in tx " << tx_hash << ", rejected");
         tvc.m_verifivation_failed = true;
         return false;
       }
+      rv.outPk.resize(tx.vout.size());
       for (size_t n = 0; n < tx.rct_signatures.outPk.size(); ++n)
         rv.outPk[n].dest = rct::pk2rct(boost::get<txout_to_key>(tx.vout[n].target).key);
+
+      if (bulletproof)
+      {
+        if (rv.p.bulletproofs.size() != tx.vout.size())
+        {
+          LOG_PRINT_L1("WRONG TRANSACTION BLOB, Bad bulletproofs size in tx " << tx_hash << ", rejected");
+          tvc.m_verifivation_failed = true;
+          return false;
+        }
+        for (size_t n = 0; n < rv.outPk.size(); ++n)
+        {
+          if (rv.p.bulletproofs[n].V.size() != 1)
+          {
+            LOG_PRINT_L1("WRONG TRANSACTION BLOB, Bad bulletproofs.V size in tx " << tx_hash << ", rejected");
+            tvc.m_verifivation_failed = true;
+            return false;
+          }
+          rv.outPk[n].mask = rv.p.bulletproofs[n].V[0];
+        }
+      }
     }
 
     if (keeped_by_block && get_blockchain_storage().is_within_compiled_block_hash_area())
@@ -767,7 +789,8 @@ namespace cryptonote
     }
     if (tx.version > 1)
     {
-      if (tx.rct_signatures.outPk.size() != tx.vout.size())
+      bool bulletproof = (tx.rct_signatures.type == rct::RCTTypeFullBulletproof || tx.rct_signatures.type == rct::RCTTypeSimpleBulletproof);
+      if (tx.rct_signatures.outPk.size() != bulletproof ? 0 : tx.vout.size())
       {
         MERROR_VER("tx with mismatched vout/outPk count, rejected for tx id= " << get_transaction_hash(tx));
         return false;
@@ -828,6 +851,7 @@ namespace cryptonote
           MERROR_VER("Unexpected Null rctSig type");
           return false;
         case rct::RCTTypeSimple:
+        case rct::RCTTypeSimpleBulletproof:
           if (!rct::verRctSimple(rv, true))
           {
             MERROR_VER("rct signature semantics check failed");
@@ -835,6 +859,7 @@ namespace cryptonote
           }
           break;
         case rct::RCTTypeFull:
+        case rct::RCTTypeFullBulletproof:
           if (!rct::verRct(rv, true))
           {
             MERROR_VER("rct signature semantics check failed");

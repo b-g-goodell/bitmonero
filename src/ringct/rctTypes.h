@@ -163,14 +163,15 @@ namespace rct {
 
     struct Bulletproof
     {
-      rct::key V, A, S, T1, T2;
+      rct::keyV V;
+      rct::key A, S, T1, T2;
       rct::key taux, mu;
       rct::keyV L, R;
       rct::key a, b, t;
 
       Bulletproof() {}
       Bulletproof(const rct::key &V, const rct::key &A, const rct::key &S, const rct::key &T1, const rct::key &T2, const rct::key &taux, const rct::key &mu, const rct::keyV &L, const rct::keyV &R, const rct::key &a, const rct::key &b, const rct::key &t):
-        V(V), A(A), S(S), T1(T1), T2(T2), taux(taux), mu(mu), L(L), R(R), a(a), b(b), t(t) {}
+        V({V}), A(A), S(S), T1(T1), T2(T2), taux(taux), mu(mu), L(L), R(R), a(a), b(b), t(t) {}
 
       BEGIN_SERIALIZE_OBJECT()
         FIELD(V)
@@ -186,7 +187,7 @@ namespace rct {
         FIELD(b)
         FIELD(t)
 
-        if (L.empty() || L.size() != R.size())
+        if (V.size() != 1 || L.empty() || L.size() != R.size())
           return false;
       END_SERIALIZE()
     };
@@ -202,6 +203,8 @@ namespace rct {
       RCTTypeNull = 0,
       RCTTypeFull = 1,
       RCTTypeSimple = 2,
+      RCTTypeFullBulletproof = 3,
+      RCTTypeSimpleBulletproof = 4,
     };
     struct rctSigBase {
         uint8_t type;
@@ -219,13 +222,13 @@ namespace rct {
           FIELD(type)
           if (type == RCTTypeNull)
             return true;
-          if (type != RCTTypeFull && type != RCTTypeSimple)
+          if (type != RCTTypeFull && type != RCTTypeFullBulletproof && type != RCTTypeSimple && type != RCTTypeSimpleBulletproof)
             return false;
           VARINT_FIELD(txnFee)
           // inputs/outputs not saved, only here for serialization help
           // FIELD(message) - not serialized, it can be reconstructed
           // FIELD(mixRing) - not serialized, it can be reconstructed
-          if (type == RCTTypeSimple)
+          if (type == RCTTypeSimple || type == RCTTypeSimpleBulletproof)
           {
             ar.tag("pseudoOuts");
             ar.begin_array();
@@ -254,18 +257,22 @@ namespace rct {
           }
           ar.end_array();
 
-          ar.tag("outPk");
-          ar.begin_array();
-          PREPARE_CUSTOM_VECTOR_SERIALIZATION(outputs, outPk);
-          if (outPk.size() != outputs)
-            return false;
-          for (size_t i = 0; i < outputs; ++i)
+          // these are V
+          if (type != RCTTypeFullBulletproof && type != RCTTypeSimpleBulletproof)
           {
-            FIELDS(outPk[i].mask)
-            if (outputs - i > 1)
-              ar.delimit_array();
+            ar.tag("outPk");
+            ar.begin_array();
+            PREPARE_CUSTOM_VECTOR_SERIALIZATION(outputs, outPk);
+            if (outPk.size() != outputs)
+              return false;
+            for (size_t i = 0; i < outputs; ++i)
+            {
+              FIELDS(outPk[i].mask)
+              if (outputs - i > 1)
+                ar.delimit_array();
+            }
+            ar.end_array();
           }
-          ar.end_array();
           return true;
         }
     };
@@ -279,24 +286,9 @@ namespace rct {
         {
           if (type == RCTTypeNull)
             return true;
-          if (type != RCTTypeFull && type != RCTTypeSimple)
+          if (type != RCTTypeFull && type != RCTTypeFullBulletproof && type != RCTTypeSimple && type != RCTTypeSimpleBulletproof)
             return false;
-          ar.tag("rangeSigs");
-          ar.begin_array();
-          PREPARE_CUSTOM_VECTOR_SERIALIZATION(outputs, rangeSigs);
-          if (!rangeSigs.empty())
-          {
-            if (rangeSigs.size() != outputs)
-              return false;
-            for (size_t i = 0; i < outputs; ++i)
-            {
-              FIELDS(rangeSigs[i])
-              if (outputs - i > 1)
-                ar.delimit_array();
-            }
-            ar.end_array();
-          }
-          else
+          if (type == RCTTypeSimpleBulletproof)
           {
             ar.tag("bp");
             ar.begin_array();
@@ -311,12 +303,27 @@ namespace rct {
             }
             ar.end_array();
           }
+          else
+          {
+            ar.tag("rangeSigs");
+            ar.begin_array();
+            PREPARE_CUSTOM_VECTOR_SERIALIZATION(outputs, rangeSigs);
+            if (rangeSigs.size() != outputs)
+              return false;
+            for (size_t i = 0; i < outputs; ++i)
+            {
+              FIELDS(rangeSigs[i])
+              if (outputs - i > 1)
+                ar.delimit_array();
+            }
+            ar.end_array();
+          }
 
           ar.tag("MGs");
           ar.begin_array();
           // we keep a byte for size of MGs, because we don't know whether this is
           // a simple or full rct signature, and it's starting to annoy the hell out of me
-          size_t mg_elements = type == RCTTypeSimple ? inputs : 1;
+          size_t mg_elements = (type == RCTTypeSimple || type == RCTTypeSimpleBulletproof) ? inputs : 1;
           PREPARE_CUSTOM_VECTOR_SERIALIZATION(mg_elements, MGs);
           if (MGs.size() != mg_elements)
             return false;
@@ -334,7 +341,7 @@ namespace rct {
             for (size_t j = 0; j < mixin + 1; ++j)
             {
               ar.begin_array();
-              size_t mg_ss2_elements = (type == RCTTypeSimple ? 1 : inputs) + 1;
+              size_t mg_ss2_elements = ((type == RCTTypeSimple || type == RCTTypeSimpleBulletproof) ? 1 : inputs) + 1;
               PREPARE_CUSTOM_VECTOR_SERIALIZATION(mg_ss2_elements, MGs[i].ss[j]);
               if (MGs[i].ss[j].size() != mg_ss2_elements)
                 return false;
