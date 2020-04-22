@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -31,6 +31,8 @@
 #include "gtest/gtest.h"
 
 #include "wallet/wallet2.h"
+#include "common/dns_utils.h"
+#include "simplewallet/simplewallet.h"
 #include <string>
 
 TEST(AddressFromTXT, Success)
@@ -42,7 +44,7 @@ TEST(AddressFromTXT, Success)
   txtr += addr;
   txtr += ";";
 
-  std::string res = tools::wallet2::address_from_txt_record(txtr);
+  std::string res = tools::dns_utils::address_from_txt_record(txtr);
 
   EXPECT_STREQ(addr.c_str(), res.c_str());
 
@@ -52,7 +54,7 @@ TEST(AddressFromTXT, Success)
 
   txtr2 += "more foobar";
 
-  res = tools::wallet2::address_from_txt_record(txtr2);
+  res = tools::dns_utils::address_from_txt_record(txtr2);
 
   EXPECT_STREQ(addr.c_str(), res.c_str());
 
@@ -61,7 +63,7 @@ TEST(AddressFromTXT, Success)
   txtr3 += addr;
   txtr3 += "; foobar";
 
-  res = tools::wallet2::address_from_txt_record(txtr3);
+  res = tools::dns_utils::address_from_txt_record(txtr3);
 
   EXPECT_STREQ(addr.c_str(), res.c_str());
 }
@@ -70,23 +72,23 @@ TEST(AddressFromTXT, Failure)
 {
   std::string txtr = "oa1:xmr recipient_address=not a real address";
 
-  std::string res = tools::wallet2::address_from_txt_record(txtr);
+  std::string res = tools::dns_utils::address_from_txt_record(txtr);
 
   ASSERT_STREQ("", res.c_str());
 
   txtr += ";";
 
-  res = tools::wallet2::address_from_txt_record(txtr);
+  res = tools::dns_utils::address_from_txt_record(txtr);
   ASSERT_STREQ("", res.c_str());
 }
 
 TEST(AddressFromURL, Success)
 {
-  std::string addr = "46BeWrHpwXmHDpDEUmZBWZfoQpdc6HaERCNmx1pEYL2rAcuwufPN9rXHHtyUA4QVy66qeFQkn6sfK8aHYjA3jk3o1Bv16em";
+  const std::string addr = MONERO_DONATION_ADDR;
   
   bool dnssec_result = false;
 
-  std::vector<std::string> addresses = tools::wallet2::addresses_from_url("donate.getmonero.org", dnssec_result);
+  std::vector<std::string> addresses = tools::dns_utils::addresses_from_url("donate.getmonero.org", dnssec_result);
 
   EXPECT_EQ(1, addresses.size());
   if (addresses.size() == 1)
@@ -95,7 +97,7 @@ TEST(AddressFromURL, Success)
   }
 
   // OpenAlias address with an @ instead of first .
-  addresses = tools::wallet2::addresses_from_url("donate@getmonero.org", dnssec_result);
+  addresses = tools::dns_utils::addresses_from_url("donate@getmonero.org", dnssec_result);
   EXPECT_EQ(1, addresses.size());
   if (addresses.size() == 1)
   {
@@ -107,7 +109,7 @@ TEST(AddressFromURL, Failure)
 {
   bool dnssec_result = false;
 
-  std::vector<std::string> addresses = tools::wallet2::addresses_from_url("example.invalid", dnssec_result);
+  std::vector<std::string> addresses = tools::dns_utils::addresses_from_url("example.invalid", dnssec_result);
 
   // for a non-existing domain such as "example.invalid", the non-existence is proved with NSEC records
   ASSERT_TRUE(dnssec_result);

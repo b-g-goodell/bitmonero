@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 //
 // All rights reserved.
 //
@@ -31,21 +31,10 @@
 #include "version.h"
 
 
-// CONFIG: choose one of the three #define's
-//
-// DB_MEMORY is a sensible default for users migrating to LMDB, as it allows
-// the exporter to use the in-memory blockchain while the other binaries
-// work with LMDB, without recompiling anything.
-//
-#define SOURCE_DB DB_MEMORY
-//#define SOURCE_DB DB_LMDB
-// to use global compile-time setting (DB_MEMORY or DB_LMDB):
-// #define SOURCE_DB BLOCKCHAIN_DB
-
-
 // bounds checking is done before writing to buffer, but buffer size
 // should be a sensible maximum
 #define BUFFER_SIZE 1000000
+#define CHUNK_SIZE_WARNING_THRESHOLD 500000
 #define NUM_BLOCKS_PER_CHUNK 1
 #define BLOCKCHAIN_RAW "blockchain.raw"
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -36,7 +36,7 @@
 #include <algorithm>
 
 #include "cryptonote_config.h"
-#include "cryptonote_core/difficulty.h"
+#include "cryptonote_basic/difficulty.h"
 
 using namespace std;
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -34,26 +34,24 @@
 #include <time.h>
 #include <iostream>
 #include <boost/algorithm/string.hpp>
+#include "mnemonics/chinese_simplified.h"
 #include "mnemonics/english.h"
 #include "mnemonics/spanish.h"
 #include "mnemonics/portuguese.h"
 #include "mnemonics/japanese.h"
-#include "mnemonics/old_english.h"
+#include "mnemonics/german.h"
+#include "mnemonics/italian.h"
+#include "mnemonics/russian.h"
+#include "mnemonics/french.h"
+#include "mnemonics/dutch.h"
+#include "mnemonics/esperanto.h"
+#include "mnemonics/lojban.h"
+#include "mnemonics/english_old.h"
 #include "mnemonics/language_base.h"
 #include "mnemonics/singleton.h"
 
 namespace
 {
-  /*!
-   * \brief Returns random index from 0 to max-1
-   * \param  max Range maximum
-   * \return     required random index
-   */
-  uint32_t get_random_index(int max)
-  {
-    return rand() % max;
-  }
-
   /*!
    * \brief Compares vectors for equality
    * \param expected expected vector
@@ -78,11 +76,17 @@ namespace
     const std::vector<std::string> &word_list = language.get_word_list();
     std::string seed = "", return_seed = "";
     // Generate a random seed without checksum
-    for (int ii = 0; ii < crypto::ElectrumWords::seed_length; ii++)
+    crypto::secret_key randkey;
+    for (size_t ii = 0; ii < sizeof(randkey); ++ii)
     {
-      seed += (word_list[get_random_index(word_list.size())] + ' ');
+      randkey.data[ii] = rand();
     }
-    seed.pop_back();
+    crypto::ElectrumWords::bytes_to_words(randkey, seed, language.get_language_name());
+    // remove the checksum word
+    const char *space = strrchr(seed.c_str(), ' ');
+    ASSERT_TRUE(space != NULL);
+    seed = std::string(seed.c_str(), space-seed.c_str());
+
     std::cout << "Test seed without checksum:\n";
     std::cout << seed << std::endl;
 
@@ -137,18 +141,64 @@ namespace
   }
 }
 
+TEST(mnemonics, consistency)
+{
+  try {
+    std::vector<std::string> language_list;
+    crypto::ElectrumWords::get_language_list(language_list);
+  }
+  catch(const std::exception &e)
+  {
+    std::cout << "Error initializing mnemonics: " << e.what() << std::endl;
+    ASSERT_TRUE(false);
+  }
+}
+
 TEST(mnemonics, all_languages)
 {
   srand(time(NULL));
   std::vector<Language::Base*> languages({
+    Language::Singleton<Language::Chinese_Simplified>::instance(),
     Language::Singleton<Language::English>::instance(),
     Language::Singleton<Language::Spanish>::instance(),
     Language::Singleton<Language::Portuguese>::instance(),
     Language::Singleton<Language::Japanese>::instance(),
+    Language::Singleton<Language::German>::instance(),
+    Language::Singleton<Language::Italian>::instance(),
+    Language::Singleton<Language::Russian>::instance(),
+    Language::Singleton<Language::French>::instance(),
+    Language::Singleton<Language::Dutch>::instance(),
+    Language::Singleton<Language::Esperanto>::instance(),
+    Language::Singleton<Language::Lojban>::instance()
   });
 
   for (std::vector<Language::Base*>::iterator it = languages.begin(); it != languages.end(); it++)
   {
-    test_language(*(*it));
+    try {
+      test_language(*(*it));
+    }
+    catch (const std::exception &e) {
+      std::cout << "Error testing " << (*it)->get_language_name() << " language: " << e.what() << std::endl;
+      ASSERT_TRUE(false);
+    }
   }
+}
+
+TEST(mnemonics, language_detection_with_bad_checksum)
+{
+    crypto::secret_key key;
+    std::string language_name;
+    bool res;
+
+    // This Portuguese (4-prefix) seed has all its words with 3-prefix that's also present in English
+    const std::string base_seed = "cinzento luxuriante leonardo gnostico digressao cupula fifa broxar iniquo louvor ovario dorsal ideologo besuntar decurso rosto susto lemure unheiro pagodeiro nitroglicerina eclusa mazurca bigorna";
+    const std::string real_checksum = "gnostico";
+
+    res = crypto::ElectrumWords::words_to_bytes(base_seed, key, language_name);
+    ASSERT_EQ(true, res);
+    ASSERT_STREQ(language_name.c_str(), "Português");
+
+    res = crypto::ElectrumWords::words_to_bytes(base_seed + " " + real_checksum, key, language_name);
+    ASSERT_EQ(true, res);
+    ASSERT_STREQ(language_name.c_str(), "Português");
 }

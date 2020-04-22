@@ -1,4 +1,4 @@
-// Copyright (c) 2014, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without modification, are
@@ -31,7 +31,7 @@
 #include <memory>  // std::unique_ptr
 #include <cstring>  // memcpy
 
-#include "cryptonote_core/cryptonote_format_utils.h"
+#include "cryptonote_basic/cryptonote_format_utils.h"
 #include "crypto/crypto.h"
 #include "profile_tools.h"
 
@@ -135,7 +135,7 @@ const unsigned int DB_BUFFER_LENGTH = 32 * MB;
 const unsigned int DB_DEF_CACHESIZE = 256 * MB;
 
 #if defined(BDB_BULK_CAN_THREAD)
-const unsigned int DB_BUFFER_COUNT = std::thread::hardware_concurrency();
+const unsigned int DB_BUFFER_COUNT = tools::get_max_concurrency();
 #else
 const unsigned int DB_BUFFER_COUNT = 1;
 #endif
@@ -354,12 +354,14 @@ void BlockchainBDB::remove_transaction_data(const crypto::hash& tx_hash, const t
 
     remove_tx_outputs(tx_hash, tx);
 
-    if (m_tx_outputs->del(DB_DEFAULT_TX, &val_h, 0))
+    auto result = m_tx_outputs->del(DB_DEFAULT_TX, &val_h, 0);
+    if (result == DB_NOTFOUND)
+        LOG_PRINT_L1("tx has no outputs to remove: " << tx_hash);
+    else if (result)
         throw1(DB_ERROR("Failed to add removal of tx outputs to db transaction"));
-
 }
 
-void BlockchainBDB::add_output(const crypto::hash& tx_hash, const tx_out& tx_output, const uint64_t& local_index, const uint64_t unlock_time)
+void BlockchainBDB::add_output(const crypto::hash& tx_hash, const tx_out& tx_output, const uint64_t& local_index, const uint64_t unlock_time, const rct::key *commitment)
 {
     LOG_PRINT_L3("BlockchainBDB::" << __func__);
     check_open();
@@ -411,7 +413,7 @@ void BlockchainBDB::remove_tx_outputs(const crypto::hash& tx_hash, const transac
     auto result = cur->get(&k, &v, DB_SET);
     if (result == DB_NOTFOUND)
     {
-        throw0(OUTPUT_DNE("Attempting to remove a tx's outputs, but none found."));
+        LOG_PRINT_L2("tx has no outputs, so no global output indices");
     }
     else if (result)
     {
@@ -419,16 +421,26 @@ void BlockchainBDB::remove_tx_outputs(const crypto::hash& tx_hash, const transac
     }
     else
     {
+        result = cur->get(&k, &v, DB_NEXT_NODUP);
+        if (result != 0 && result != DB_NOTFOUND)
+            throw0(DB_ERROR("DB error attempting to get next non-duplicate tx hash"));
+
+        if (result == 0)
+            result = cur->get(&k, &v, DB_PREV);
+        else if (result == DB_NOTFOUND)
+            result = cur->get(&k, &v, DB_LAST);
+
         db_recno_t num_elems = 0;
         cur->count(&num_elems, 0);
 
-        for (uint64_t i = 0; i < num_elems; ++i)
+        // remove in order: from newest to oldest
+        for (uint64_t i = num_elems; i > 0; --i)
         {
-            const tx_out tx_output = tx.vout[i];
+            const tx_out tx_output = tx.vout[i-1];
             remove_output(v, tx_output.amount);
-            if (i < num_elems - 1)
+            if (i > 1)
             {
-                cur->get(&k, &v, DB_NEXT_DUP);
+                cur->get(&k, &v, DB_PREV_DUP);
             }
         }
     }
@@ -504,20 +516,43 @@ void BlockchainBDB::remove_amount_output_index(const uint64_t amount, const uint
     db_recno_t num_elems = 0;
     cur->count(&num_elems, 0);
 
+    // workaround for Berkeley DB to start at end of k's duplicate list:
+    // if next key exists:
+    //   - move cursor to start of next key's duplicate list, then move back one
+    //     duplicate element to reach the end of the original key's duplicate
+    //     list.
+    //
+    // else if the next key doesn't exist:
+    //   - that means we're already on the last key.
+    //   - move cursor to last element in the db, which is the last element of
+    //     the desired key's duplicate list.
+
+    result = cur->get(&k, &v, DB_NEXT_NODUP);
+    if (result != 0 && result != DB_NOTFOUND)
+      throw0(DB_ERROR("DB error attempting to get next non-duplicate output amount"));
+
+    if (result == 0)
+      result = cur->get(&k, &v, DB_PREV);
+    else if (result == DB_NOTFOUND)
+      result = cur->get(&k, &v, DB_LAST);
+
+    bool found_index = false;
     uint64_t amount_output_index = 0;
     uint64_t goi = 0;
-    bool found_index = false;
-    for (uint64_t i = 0; i < num_elems; ++i)
+
+    for (uint64_t i = num_elems; i > 0; --i)
     {
-        goi = v;
-        if (goi == global_output_index)
-        {
-            amount_output_index = i;
-            found_index = true;
-            break;
-        }
-        cur->get(&k, &v, DB_NEXT_DUP);
+      goi = v;
+      if (goi == global_output_index)
+      {
+        amount_output_index = i-1;
+        found_index = true;
+        break;
+      }
+      if (i > 1)
+        cur->get(&k, &v, DB_PREV_DUP);
     }
+
     if (found_index)
     {
         // found the amount output index
@@ -735,17 +770,19 @@ BlockchainBDB::~BlockchainBDB()
 }
 
 BlockchainBDB::BlockchainBDB(bool batch_transactions) :
+        BlockchainDB(),
         m_buffer(DB_BUFFER_COUNT, DB_BUFFER_LENGTH)
 {
     LOG_PRINT_L3("BlockchainBDB::" << __func__);
     // initialize folder to something "safe" just in case
     // someone accidentally misuses this class...
     m_folder = "thishsouldnotexistbecauseitisgibberish";
-    m_open = false;
     m_run_checkpoint = 0;
     m_batch_transactions = batch_transactions;
     m_write_txn = nullptr;
     m_height = 0;
+
+    m_hardfork = nullptr;
 }
 
 void BlockchainBDB::open(const std::string& filename, const int db_flags)
@@ -783,9 +820,11 @@ void BlockchainBDB::open(const std::string& filename, const int db_flags)
         m_env->set_lk_max_locks(DB_MAX_LOCKS);
         m_env->set_lk_max_lockers(DB_MAX_LOCKS);
         m_env->set_lk_max_objects(DB_MAX_LOCKS);
-        
+
+        #ifndef __OpenBSD__ //OpenBSD's DB package is too old to support this feature
         if(m_auto_remove_logs)
           m_env->log_set_config(DB_LOG_AUTO_REMOVE, 1);
+        #endif
 
         // last parameter left 0, files will be created with default rw access
         m_env->open(filename.c_str(), db_env_open_flags, 0);
@@ -888,12 +927,12 @@ void BlockchainBDB::open(const std::string& filename, const int db_flags)
         // to zero (0) for reliability.
         m_blocks->stat(NULL, &stats, 0);
         m_height = stats->bt_nkeys;
-        delete stats;
+        free(stats);
 
         // see above comment about DB_FAST_STAT
         m_output_indices->stat(NULL, &stats, 0);
         m_num_outputs = stats->bt_nkeys;
-        delete stats;
+        free(stats);
 
         // checks for compatibility
         bool compatible = true;
@@ -908,10 +947,12 @@ void BlockchainBDB::open(const std::string& filename, const int db_flags)
                 LOG_PRINT_RED_L0("Existing BerkeleyDB database was made by a later version. We don't know how it will change yet.");
                 compatible = false;
             }
-            else if (VERSION > 0 && result < VERSION)
+#if VERSION > 0
+            else if (result < VERSION)
             {
                 compatible = false;
             }
+#endif
         }
         else
         {
@@ -1032,8 +1073,10 @@ void BlockchainBDB::sync()
 
         m_spent_keys->sync(0);
 
-        m_hf_starting_heights->sync(0);
-        m_hf_versions->sync(0);
+        if (m_hf_starting_heights != nullptr)
+          m_hf_starting_heights->sync(0);
+        if (m_hf_versions != nullptr)
+          m_hf_versions->sync(0);
 
         m_properties->sync(0);
     }
@@ -1192,7 +1235,7 @@ void BlockchainBDB::unlock()
     check_open();
 }
 
-bool BlockchainBDB::block_exists(const crypto::hash& h) const
+bool BlockchainBDB::block_exists(const crypto::hash& h, uint64_t *height) const
 {
     LOG_PRINT_L3("BlockchainBDB::" << __func__);
     check_open();
@@ -1207,6 +1250,9 @@ bool BlockchainBDB::block_exists(const crypto::hash& h) const
     }
     else if (get_result)
         throw0(DB_ERROR("DB error attempting to fetch block index from hash"));
+
+    if (height)
+      *height = get_result - 1;
 
     return true;
 }
@@ -1767,9 +1813,10 @@ bool BlockchainBDB::has_key_image(const crypto::key_image& img) const
 // Ostensibly BerkeleyDB has batch transaction support built-in,
 // so the following few functions will be NOP.
 
-void BlockchainBDB::batch_start(uint64_t batch_num_blocks)
+bool BlockchainBDB::batch_start(uint64_t batch_num_blocks)
 {
     LOG_PRINT_L3("BlockchainBDB::" << __func__);
+    return false;
 }
 
 void BlockchainBDB::batch_commit()
@@ -1792,6 +1839,21 @@ void BlockchainBDB::set_batch_transactions(bool batch_transactions)
     LOG_PRINT_L3("BlockchainBDB::" << __func__);
     m_batch_transactions = batch_transactions;
     LOG_PRINT_L3("batch transactions " << (m_batch_transactions ? "enabled" : "disabled"));
+}
+
+void BlockchainBDB::block_txn_start(bool readonly)
+{
+  // TODO
+}
+
+void BlockchainBDB::block_txn_stop()
+{
+  // TODO
+}
+
+void BlockchainBDB::block_txn_abort()
+{
+  // TODO
 }
 
 uint64_t BlockchainBDB::add_block(const block& blk, const size_t& block_size, const difficulty_type& cumulative_difficulty, const uint64_t& coins_generated, const std::vector<transaction>& txs)
@@ -2122,32 +2184,99 @@ void BlockchainBDB::get_output_tx_and_index(const uint64_t& amount, const std::v
     LOG_PRINT_L3("db3: " << db3);
 }
 
-void BlockchainBDB::set_hard_fork_starting_height(uint8_t version, uint64_t height)
+std::map<uint64_t, uint64_t>::BlockchainBDB::get_output_histogram(const std::vector<uint64_t> &amounts) const
 {
-    LOG_PRINT_L3("BlockchainBDB::" << __func__);
-    check_open();
-
-    Dbt_copy<uint32_t> val_key(version + 1);
-    Dbt_copy<uint64_t> val(height);
-    if (m_hf_starting_heights->put(DB_DEFAULT_TX, &val_key, &val, 0))
-        throw1(DB_ERROR("Error adding hard fork starting height to db transaction."));
+  LOG_PRINT_L3("BlockchainBDB::" << __func__);
+  throw1(DB_ERROR("Not implemented."));
 }
 
-uint64_t BlockchainBDB::get_hard_fork_starting_height(uint8_t version) const
+void BlockchainBDB::check_hard_fork_info()
 {
-    LOG_PRINT_L3("BlockchainBDB::" << __func__);
-    check_open();
+  LOG_PRINT_L3("BlockchainBDB::" << __func__);
+  check_open();
 
-    Dbt_copy<uint32_t> key(version + 1);
-    Dbt_copy<uint64_t> result;
+  if (m_hf_versions == nullptr)
+  {
+    LOG_PRINT_L0("hf versions DB not open, so not checking");
+    return;
+  }
 
-    auto get_result = m_hf_starting_heights->get(DB_DEFAULT_TX, &key, &result, 0);
-    if (get_result == DB_NOTFOUND || get_result == DB_KEYEMPTY)
-        return std::numeric_limits<uint64_t>::max();
-    else if (get_result)
-        throw0(DB_ERROR("Error attempting to retrieve hard fork starting height from the db"));
+  DB_BTREE_STAT* db_stat1, * db_stat2;
 
-    return result;
+  // DB_FAST_STAT can apparently cause an incorrect number of records
+  // to be returned.  The flag should be set to 0 instead if this proves
+  // to be the case.
+
+  // Set txn to NULL and DB_FAST_STAT to zero (0) for reliability.
+  m_blocks->stat(NULL, &db_stat1, 0);
+  m_hf_versions->stat(NULL, &db_stat2, 0);
+  if (db_stat1->bt_nkeys != db_stat2->bt_nkeys)
+  {
+    LOG_PRINT_L0("num blocks " << db_stat1->bt_nkeys << " != " << "num hf_versions " << db_stat2->bt_nkeys << " - will clear the two hard fork DBs");
+
+    bdb_txn_safe txn;
+    bdb_txn_safe* txn_ptr = &txn;
+    if (m_write_txn)
+      txn_ptr = m_write_txn;
+    else
+    {
+      if (m_env->txn_begin(NULL, txn, 0))
+        throw0(DB_ERROR("Failed to create a transaction for the db"));
+    }
+
+    try
+    {
+      uint32_t count;
+      m_hf_starting_heights->truncate(*txn_ptr, &count, 0);
+      LOG_PRINT_L0("hf_starting_heights count: " << count);
+      m_hf_versions->truncate(*txn_ptr, &count, 0);
+      LOG_PRINT_L0("hf_versions count: " << count);
+
+      if (!m_write_txn)
+        txn.commit();
+    }
+    catch (const std::exception& e)
+    {
+      throw0(DB_ERROR(std::string("Failed to clear two hard fork DBs: ").append(e.what()).c_str()));
+    }
+  }
+  delete db_stat1;
+  delete db_stat2;
+}
+
+void BlockchainBDB::drop_hard_fork_info()
+{
+  LOG_PRINT_L3("BlockchainBDB::" << __func__);
+  check_open();
+
+  bdb_txn_safe txn;
+  bdb_txn_safe* txn_ptr = &txn;
+  if (m_write_txn)
+    txn_ptr = m_write_txn;
+  else
+  {
+    if (m_env->txn_begin(NULL, txn, 0))
+      throw0(DB_ERROR("Failed to create a transaction for the db"));
+  }
+
+  try
+  {
+    m_hf_starting_heights->close(0);
+    m_hf_versions->close(0);
+    m_hf_starting_heights = nullptr;
+    m_hf_versions = nullptr;
+    if (m_env->dbremove(*txn_ptr, BDB_HF_STARTING_HEIGHTS, NULL, 0) != 0)
+      LOG_ERROR("Error removing hf_starting_heights");
+    if (m_env->dbremove(*txn_ptr, BDB_HF_VERSIONS, NULL, 0) != 0)
+      LOG_ERROR("Error removing hf_versions");
+
+    if (!m_write_txn)
+      txn.commit();
+  }
+  catch (const std::exception& e)
+  {
+    throw0(DB_ERROR(std::string("Failed to drop hard fork info: ").append(e.what()).c_str()));
+  }
 }
 
 void BlockchainBDB::set_hard_fork_version(uint64_t height, uint8_t version)
@@ -2200,8 +2329,14 @@ void BlockchainBDB::checkpoint_worker() const
     LOG_PRINT_L0("Leaving BDB checkpoint thread.");
 }
 
+bool BlockchainBDB::is_read_only() const
+{
+  return false;
+}
+
 void BlockchainBDB::fixup()
 {
+  LOG_PRINT_L3("BlockchainBDB::" << __func__);
   // Always call parent as well
   BlockchainDB::fixup();
 }

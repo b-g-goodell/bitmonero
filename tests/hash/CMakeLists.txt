@@ -1,4 +1,4 @@
-# Copyright (c) 2014-2015, The Monero Project
+# Copyright (c) 2014-2018, The Monero Project
 #
 # All rights reserved.
 #
@@ -35,13 +35,15 @@ add_executable(hash-tests
   ${hash_sources}
   ${hash_headers})
 target_link_libraries(hash-tests
-  LINK_PRIVATE
-    crypto)
+  PRIVATE
+    common
+    cncrypto
+    ${EXTRA_LIBRARIES})
 set_property(TARGET hash-tests
   PROPERTY
     FOLDER "tests")
 
-foreach (hash IN ITEMS fast slow tree extra-blake extra-groestl extra-jh extra-skein)
+foreach (hash IN ITEMS fast slow slow-1 tree extra-blake extra-groestl extra-jh extra-skein)
   add_test(
     NAME    "hash-${hash}"
     COMMAND hash-tests "${hash}" "${CMAKE_CURRENT_SOURCE_DIR}/tests-${hash}.txt")

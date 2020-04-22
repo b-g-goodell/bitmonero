@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 //
 // All rights reserved.
 //
@@ -34,204 +34,385 @@
 #include <vector>
 
 #include "tx_pool.h"
-#include "cryptonote_format_utils.h"
-#include "cryptonote_boost_serialization.h"
+#include "cryptonote_tx_utils.h"
+#include "cryptonote_basic/cryptonote_boost_serialization.h"
 #include "cryptonote_config.h"
-#if BLOCKCHAIN_DB == DB_LMDB
 #include "blockchain.h"
-#else
-#include "blockchain_storage.h"
-#endif
+#include "blockchain_db/blockchain_db.h"
 #include "common/boost_serialization_helper.h"
 #include "common/int-util.h"
 #include "misc_language.h"
 #include "warnings.h"
+#include "common/perf_timer.h"
 #include "crypto/hash.h"
 
+#undef MONERO_DEFAULT_LOG_CATEGORY
+#define MONERO_DEFAULT_LOG_CATEGORY "txpool"
+
 DISABLE_VS_WARNINGS(4244 4345 4503) //'boost::foreach_detail_::or_' : decorated name length exceeded, name was truncated
+
+using namespace crypto;
 
 namespace cryptonote
 {
   namespace
   {
-    size_t const TRANSACTION_SIZE_LIMIT = (((CRYPTONOTE_BLOCK_GRANTED_FULL_REWARD_ZONE * 125) / 100) - CRYPTONOTE_COINBASE_BLOB_RESERVED_SIZE);
+    //TODO: constants such as these should at least be in the header,
+    //      but probably somewhere more accessible to the rest of the
+    //      codebase.  As it stands, it is at best nontrivial to test
+    //      whether or not changing these parameters (or adding new)
+    //      will work correctly.
     time_t const MIN_RELAY_TIME = (60 * 5); // only start re-relaying transactions after that many seconds
     time_t const MAX_RELAY_TIME = (60 * 60 * 4); // at most that many seconds between resends
+    float const ACCEPT_THRESHOLD = 1.0f;
 
     // a kind of increasing backoff within min/max bounds
-    time_t get_relay_delay(time_t now, time_t received)
+    uint64_t get_relay_delay(time_t now, time_t received)
     {
       time_t d = (now - received + MIN_RELAY_TIME) / MIN_RELAY_TIME * MIN_RELAY_TIME;
       if (d > MAX_RELAY_TIME)
         d = MAX_RELAY_TIME;
       return d;
     }
+
+    uint64_t template_accept_threshold(uint64_t amount)
+    {
+      return amount * ACCEPT_THRESHOLD;
+    }
+
+    uint64_t get_transaction_size_limit(uint8_t version)
+    {
+      return get_min_block_size(version) - CRYPTONOTE_COINBASE_BLOB_RESERVED_SIZE;
+    }
+
+    // This class is meant to create a batch when none currently exists.
+    // If a batch exists, it can't be from another thread, since we can
+    // only be called with the txpool lock taken, and it is held during
+    // the whole prepare/handle/cleanup incoming block sequence.
+    class LockedTXN {
+    public:
+      LockedTXN(Blockchain &b): m_blockchain(b), m_batch(false) {
+        m_batch = m_blockchain.get_db().batch_start();
+      }
+      ~LockedTXN() { try { if (m_batch) { m_blockchain.get_db().batch_stop(); } } catch (const std::exception &e) { MWARNING("LockedTXN dtor filtering exception: " << e.what()); } }
+    private:
+      Blockchain &m_blockchain;
+      bool m_batch;
+    };
   }
   //---------------------------------------------------------------------------------
-#if BLOCKCHAIN_DB == DB_LMDB
   //---------------------------------------------------------------------------------
-  tx_memory_pool::tx_memory_pool(Blockchain& bchs): m_blockchain(bchs)
+  tx_memory_pool::tx_memory_pool(Blockchain& bchs): m_blockchain(bchs), m_txpool_max_size(DEFAULT_TXPOOL_MAX_SIZE), m_txpool_size(0)
   {
 
   }
-#else
-  tx_memory_pool::tx_memory_pool(blockchain_storage& bchs): m_blockchain(bchs)
-  {
-
-  }
-#endif
   //---------------------------------------------------------------------------------
-  bool tx_memory_pool::add_tx(const transaction &tx, /*const crypto::hash& tx_prefix_hash,*/ const crypto::hash &id, size_t blob_size, tx_verification_context& tvc, bool kept_by_block, bool relayed)
+  bool tx_memory_pool::add_tx(transaction &tx, /*const crypto::hash& tx_prefix_hash,*/ const crypto::hash &id, size_t blob_size, tx_verification_context& tvc, bool kept_by_block, bool relayed, bool do_not_relay, uint8_t version)
   {
+    // this should already be called with that lock, but let's make it explicit for clarity
+    CRITICAL_REGION_LOCAL(m_transactions_lock);
 
+    PERF_TIMER(add_tx);
+    if (tx.version == 0)
+    {
+      // v0 never accepted
+      LOG_PRINT_L1("transaction version 0 is invalid");
+      tvc.m_verifivation_failed = true;
+      return false;
+    }
+
+    // we do not accept transactions that timed out before, unless they're
+    // kept_by_block
+    if (!kept_by_block && m_timed_out_transactions.find(id) != m_timed_out_transactions.end())
+    {
+      // not clear if we should set that, since verifivation (sic) did not fail before, since
+      // the tx was accepted before timing out.
+      tvc.m_verifivation_failed = true;
+      return false;
+    }
 
     if(!check_inputs_types_supported(tx))
     {
       tvc.m_verifivation_failed = true;
+      tvc.m_invalid_input = true;
       return false;
     }
 
-    uint64_t inputs_amount = 0;
-    if(!get_inputs_money_amount(tx, inputs_amount))
+    // fee per kilobyte, size rounded up.
+    uint64_t fee;
+
+    if (tx.version == 1)
+    {
+      uint64_t inputs_amount = 0;
+      if(!get_inputs_money_amount(tx, inputs_amount))
+      {
+        tvc.m_verifivation_failed = true;
+        return false;
+      }
+
+      uint64_t outputs_amount = get_outs_money_amount(tx);
+      if(outputs_amount > inputs_amount)
+      {
+        LOG_PRINT_L1("transaction use more money than it has: use " << print_money(outputs_amount) << ", have " << print_money(inputs_amount));
+        tvc.m_verifivation_failed = true;
+        tvc.m_overspend = true;
+        return false;
+      }
+      else if(outputs_amount == inputs_amount)
+      {
+        LOG_PRINT_L1("transaction fee is zero: outputs_amount == inputs_amount, rejecting.");
+        tvc.m_verifivation_failed = true;
+        tvc.m_fee_too_low = true;
+        return false;
+      }
+
+      fee = inputs_amount - outputs_amount;
+    }
+    else
+    {
+      fee = tx.rct_signatures.txnFee;
+    }
+
+    if (!kept_by_block && !m_blockchain.check_fee(blob_size, fee))
     {
       tvc.m_verifivation_failed = true;
+      tvc.m_fee_too_low = true;
       return false;
     }
 
-    uint64_t outputs_amount = get_outs_money_amount(tx);
-
-    if(outputs_amount >= inputs_amount)
+    size_t tx_size_limit = get_transaction_size_limit(version);
+    if (!kept_by_block && blob_size > tx_size_limit)
     {
-      LOG_PRINT_L1("transaction use more money then it has: use " << print_money(outputs_amount) << ", have " << print_money(inputs_amount));
+      LOG_PRINT_L1("transaction is too big: " << blob_size << " bytes, maximum size: " << tx_size_limit);
       tvc.m_verifivation_failed = true;
+      tvc.m_too_big = true;
       return false;
     }
 
-    uint64_t fee = inputs_amount - outputs_amount;
-    uint64_t needed_fee = blob_size / 1024;
-    needed_fee += (blob_size % 1024) ? 1 : 0;
-    needed_fee *= FEE_PER_KB;
-    if (!kept_by_block && fee < needed_fee /*&& fee < MINING_ALLOWED_LEGACY_FEE*/)
-    {
-      LOG_PRINT_L1("transaction fee is not enough: " << print_money(fee) << ", minimum fee: " << print_money(needed_fee));
-      tvc.m_verifivation_failed = true;
-      return false;
-    }
-
-    if (!kept_by_block && blob_size >= TRANSACTION_SIZE_LIMIT)
-    {
-      LOG_PRINT_L1("transaction is too big: " << blob_size << " bytes, maximum size: " << TRANSACTION_SIZE_LIMIT);
-      tvc.m_verifivation_failed = true;
-      return false;
-    }
-
-    //check key images for transaction if it is not kept by block
+    // if the transaction came from a block popped from the chain,
+    // don't check if we have its key images as spent.
+    // TODO: Investigate why not?
     if(!kept_by_block)
     {
       if(have_tx_keyimges_as_spent(tx))
       {
+        mark_double_spend(tx);
         LOG_PRINT_L1("Transaction with id= "<< id << " used already spent key images");
         tvc.m_verifivation_failed = true;
+        tvc.m_double_spend = true;
         return false;
       }
     }
 
-    if (!m_blockchain.check_tx_outputs(tx))
+    if (!m_blockchain.check_tx_outputs(tx, tvc))
     {
-      LOG_PRINT_L1("Transaction with id= "<< id << " has at least one invalid outout");
+      LOG_PRINT_L1("Transaction with id= "<< id << " has at least one invalid output");
       tvc.m_verifivation_failed = true;
+      tvc.m_invalid_output = true;
       return false;
     }
 
+    // assume failure during verification steps until success is certain
+    tvc.m_verifivation_failed = true;
+
+    time_t receive_time = time(nullptr);
+
     crypto::hash max_used_block_id = null_hash;
     uint64_t max_used_block_height = 0;
-#if BLOCKCHAIN_DB == DB_LMDB
-    bool ch_inp_res = m_blockchain.check_tx_inputs(tx, max_used_block_height, max_used_block_id, kept_by_block);
-#else
-    bool ch_inp_res = m_blockchain.check_tx_inputs(tx, max_used_block_height, max_used_block_id);
-#endif
-    CRITICAL_REGION_LOCAL(m_transactions_lock);
+    cryptonote::txpool_tx_meta_t meta;
+    bool ch_inp_res = m_blockchain.check_tx_inputs(tx, max_used_block_height, max_used_block_id, tvc, kept_by_block);
     if(!ch_inp_res)
     {
+      // if the transaction was valid before (kept_by_block), then it
+      // may become valid again, so ignore the failed inputs check.
       if(kept_by_block)
       {
-        //anyway add this transaction to pool, because it related to block
-        auto txd_p = m_transactions.insert(transactions_container::value_type(id, tx_details()));
-        CHECK_AND_ASSERT_MES(txd_p.second, false, "transaction already exists at inserting in memory pool");
-        txd_p.first->second.blob_size = blob_size;
-        txd_p.first->second.tx = tx;
-        txd_p.first->second.fee = inputs_amount - outputs_amount;
-        txd_p.first->second.max_used_block_id = null_hash;
-        txd_p.first->second.max_used_block_height = 0;
-        txd_p.first->second.kept_by_block = kept_by_block;
-        txd_p.first->second.receive_time = time(nullptr);
-        txd_p.first->second.last_relayed_time = time(NULL);
-        txd_p.first->second.relayed = relayed;
+        meta.blob_size = blob_size;
+        meta.fee = fee;
+        meta.max_used_block_id = null_hash;
+        meta.max_used_block_height = 0;
+        meta.last_failed_height = 0;
+        meta.last_failed_id = null_hash;
+        meta.kept_by_block = kept_by_block;
+        meta.receive_time = receive_time;
+        meta.last_relayed_time = time(NULL);
+        meta.relayed = relayed;
+        meta.do_not_relay = do_not_relay;
+        meta.double_spend_seen = have_tx_keyimges_as_spent(tx);
+        memset(meta.padding, 0, sizeof(meta.padding));
+        try
+        {
+          CRITICAL_REGION_LOCAL1(m_blockchain);
+          LockedTXN lock(m_blockchain);
+          m_blockchain.add_txpool_tx(tx, meta);
+          if (!insert_key_images(tx, kept_by_block))
+            return false;
+          m_txs_by_fee_and_receive_time.emplace(std::pair<double, std::time_t>(fee / (double)blob_size, receive_time), id);
+        }
+        catch (const std::exception &e)
+        {
+          MERROR("transaction already exists at inserting in memory pool: " << e.what());
+          return false;
+        }
         tvc.m_verifivation_impossible = true;
         tvc.m_added_to_pool = true;
       }else
       {
         LOG_PRINT_L1("tx used wrong inputs, rejected");
         tvc.m_verifivation_failed = true;
+        tvc.m_invalid_input = true;
         return false;
       }
     }else
     {
       //update transactions container
-      auto txd_p = m_transactions.insert(transactions_container::value_type(id, tx_details()));
-      CHECK_AND_ASSERT_MES(txd_p.second, false, "intrnal error: transaction already exists at inserting in memorypool");
-      txd_p.first->second.blob_size = blob_size;
-      txd_p.first->second.tx = tx;
-      txd_p.first->second.kept_by_block = kept_by_block;
-      txd_p.first->second.fee = inputs_amount - outputs_amount;
-      txd_p.first->second.max_used_block_id = max_used_block_id;
-      txd_p.first->second.max_used_block_height = max_used_block_height;
-      txd_p.first->second.last_failed_height = 0;
-      txd_p.first->second.last_failed_id = null_hash;
-      txd_p.first->second.receive_time = time(nullptr);
-      txd_p.first->second.last_relayed_time = time(NULL);
-      txd_p.first->second.relayed = relayed;
+      meta.blob_size = blob_size;
+      meta.kept_by_block = kept_by_block;
+      meta.fee = fee;
+      meta.max_used_block_id = max_used_block_id;
+      meta.max_used_block_height = max_used_block_height;
+      meta.last_failed_height = 0;
+      meta.last_failed_id = null_hash;
+      meta.receive_time = receive_time;
+      meta.last_relayed_time = time(NULL);
+      meta.relayed = relayed;
+      meta.do_not_relay = do_not_relay;
+      meta.double_spend_seen = false;
+      memset(meta.padding, 0, sizeof(meta.padding));
+
+      try
+      {
+        CRITICAL_REGION_LOCAL1(m_blockchain);
+        LockedTXN lock(m_blockchain);
+        m_blockchain.remove_txpool_tx(get_transaction_hash(tx));
+        m_blockchain.add_txpool_tx(tx, meta);
+        if (!insert_key_images(tx, kept_by_block))
+          return false;
+        m_txs_by_fee_and_receive_time.emplace(std::pair<double, std::time_t>(fee / (double)blob_size, receive_time), id);
+      }
+      catch (const std::exception &e)
+      {
+        MERROR("internal error: transaction already exists at inserting in memory pool: " << e.what());
+        return false;
+      }
       tvc.m_added_to_pool = true;
 
-      if(txd_p.first->second.fee > 0)
+      if(meta.fee > 0 && !do_not_relay)
         tvc.m_should_be_relayed = true;
     }
 
-    tvc.m_verifivation_failed = true;
-    //update image_keys container, here should everything goes ok.
-    BOOST_FOREACH(const auto& in, tx.vin)
+    tvc.m_verifivation_failed = false;
+    m_txpool_size += blob_size;
+
+    MINFO("Transaction added to pool: txid " << id << " bytes: " << blob_size << " fee/byte: " << (fee / (double)blob_size));
+
+    prune(m_txpool_max_size);
+
+    return true;
+  }
+  //---------------------------------------------------------------------------------
+  bool tx_memory_pool::add_tx(transaction &tx, tx_verification_context& tvc, bool keeped_by_block, bool relayed, bool do_not_relay, uint8_t version)
+  {
+    crypto::hash h = null_hash;
+    size_t blob_size = 0;
+    if (!get_transaction_hash(tx, h, blob_size) || blob_size == 0)
+      return false;
+    return add_tx(tx, h, blob_size, tvc, keeped_by_block, relayed, do_not_relay, version);
+  }
+  //---------------------------------------------------------------------------------
+  size_t tx_memory_pool::get_txpool_size() const
+  {
+    CRITICAL_REGION_LOCAL(m_transactions_lock);
+    return m_txpool_size;
+  }
+  //---------------------------------------------------------------------------------
+  void tx_memory_pool::set_txpool_max_size(size_t bytes)
+  {
+    CRITICAL_REGION_LOCAL(m_transactions_lock);
+    m_txpool_max_size = bytes;
+  }
+  //---------------------------------------------------------------------------------
+  void tx_memory_pool::prune(size_t bytes)
+  {
+    CRITICAL_REGION_LOCAL(m_transactions_lock);
+    if (bytes == 0)
+      bytes = m_txpool_max_size;
+    CRITICAL_REGION_LOCAL1(m_blockchain);
+    LockedTXN lock(m_blockchain);
+
+    // this will never remove the first one, but we don't care
+    auto it = --m_txs_by_fee_and_receive_time.end();
+    while (it != m_txs_by_fee_and_receive_time.begin())
     {
+      if (m_txpool_size <= bytes)
+        break;
+      try
+      {
+        const crypto::hash &txid = it->second;
+        txpool_tx_meta_t meta;
+        if (!m_blockchain.get_txpool_tx_meta(txid, meta))
+        {
+          MERROR("Failed to find tx in txpool");
+          return;
+        }
+        // don't prune the kept_by_block ones, they're likely added because we're adding a block with those
+        if (meta.kept_by_block)
+        {
+          --it;
+          continue;
+        }
+        cryptonote::blobdata txblob = m_blockchain.get_txpool_tx_blob(txid);
+        cryptonote::transaction tx;
+        if (!parse_and_validate_tx_from_blob(txblob, tx))
+        {
+          MERROR("Failed to parse tx from txpool");
+          return;
+        }
+        // remove first, in case this throws, so key images aren't removed
+        MINFO("Pruning tx " << txid << " from txpool: size: " << it->first.second << ", fee/byte: " << it->first.first);
+        m_blockchain.remove_txpool_tx(txid);
+        m_txpool_size -= txblob.size();
+        remove_transaction_keyimages(tx);
+        MINFO("Pruned tx " << txid << " from txpool: size: " << it->first.second << ", fee/byte: " << it->first.first);
+        m_txs_by_fee_and_receive_time.erase(it--);
+      }
+      catch (const std::exception &e)
+      {
+        MERROR("Error while pruning txpool: " << e.what());
+        return;
+      }
+    }
+    if (m_txpool_size > bytes)
+      MINFO("Pool size after pruning is larger than limit: " << m_txpool_size << "/" << bytes);
+  }
+  //---------------------------------------------------------------------------------
+  bool tx_memory_pool::insert_key_images(const transaction &tx, bool kept_by_block)
+  {
+    for(const auto& in: tx.vin)
+    {
+      const crypto::hash id = get_transaction_hash(tx);
       CHECKED_GET_SPECIFIC_VARIANT(in, const txin_to_key, txin, false);
       std::unordered_set<crypto::hash>& kei_image_set = m_spent_key_images[txin.k_image];
-      CHECK_AND_ASSERT_MES(kept_by_block || kei_image_set.size() == 0, false, "internal error: keeped_by_block=" << kept_by_block
+      CHECK_AND_ASSERT_MES(kept_by_block || kei_image_set.size() == 0, false, "internal error: kept_by_block=" << kept_by_block
                                           << ",  kei_image_set.size()=" << kei_image_set.size() << ENDL << "txin.k_image=" << txin.k_image << ENDL
                                           << "tx_id=" << id );
       auto ins_res = kei_image_set.insert(id);
       CHECK_AND_ASSERT_MES(ins_res.second, false, "internal error: try to insert duplicate iterator in key_image set");
     }
-
-    tvc.m_verifivation_failed = false;
-
-    m_txs_by_fee.emplace((double)blob_size / fee, id);
-    //succeed
     return true;
   }
   //---------------------------------------------------------------------------------
-  bool tx_memory_pool::add_tx(const transaction &tx, tx_verification_context& tvc, bool keeped_by_block, bool relayed)
-  {
-    crypto::hash h = null_hash;
-    size_t blob_size = 0;
-    get_transaction_hash(tx, h, blob_size);
-    return add_tx(tx, h, blob_size, tvc, keeped_by_block, relayed);
-  }
-  //---------------------------------------------------------------------------------
+  //FIXME: Can return early before removal of all of the key images.
+  //       At the least, need to make sure that a false return here
+  //       is treated properly.  Should probably not return early, however.
   bool tx_memory_pool::remove_transaction_keyimages(const transaction& tx)
   {
     CRITICAL_REGION_LOCAL(m_transactions_lock);
+    CRITICAL_REGION_LOCAL1(m_blockchain);
     // ND: Speedup
     // 1. Move transaction hash calcuation outside of loop. ._.
     crypto::hash actual_hash = get_transaction_hash(tx);
-    BOOST_FOREACH(const txin_v& vi, tx.vin)
+    for(const txin_v& vi: tx.vin)
     {
       CHECKED_GET_SPECIFIC_VARIANT(vi, const txin_to_key, txin, false);
       auto it = m_spent_key_images.find(txin.k_image);
@@ -255,25 +436,48 @@ namespace cryptonote
     return true;
   }
   //---------------------------------------------------------------------------------
-  bool tx_memory_pool::take_tx(const crypto::hash &id, transaction &tx, size_t& blob_size, uint64_t& fee, bool &relayed)
+  bool tx_memory_pool::take_tx(const crypto::hash &id, transaction &tx, size_t& blob_size, uint64_t& fee, bool &relayed, bool &do_not_relay, bool &double_spend_seen)
   {
     CRITICAL_REGION_LOCAL(m_transactions_lock);
-    auto it = m_transactions.find(id);
-    if(it == m_transactions.end())
-      return false;
+    CRITICAL_REGION_LOCAL1(m_blockchain);
 
     auto sorted_it = find_tx_in_sorted_container(id);
-
-    if (sorted_it == m_txs_by_fee.end())
+    if (sorted_it == m_txs_by_fee_and_receive_time.end())
       return false;
 
-    tx = it->second.tx;
-    blob_size = it->second.blob_size;
-    fee = it->second.fee;
-    relayed = it->second.relayed;
-    remove_transaction_keyimages(it->second.tx);
-    m_transactions.erase(it);
-    m_txs_by_fee.erase(sorted_it);
+    try
+    {
+      LockedTXN lock(m_blockchain);
+      txpool_tx_meta_t meta;
+      if (!m_blockchain.get_txpool_tx_meta(id, meta))
+      {
+        MERROR("Failed to find tx in txpool");
+        return false;
+      }
+      cryptonote::blobdata txblob = m_blockchain.get_txpool_tx_blob(id);
+      if (!parse_and_validate_tx_from_blob(txblob, tx))
+      {
+        MERROR("Failed to parse tx from txpool");
+        return false;
+      }
+      blob_size = meta.blob_size;
+      fee = meta.fee;
+      relayed = meta.relayed;
+      do_not_relay = meta.do_not_relay;
+      double_spend_seen = meta.double_spend_seen;
+
+      // remove first, in case this throws, so key images aren't removed
+      m_blockchain.remove_txpool_tx(id);
+      m_txpool_size -= blob_size;
+      remove_transaction_keyimages(tx);
+    }
+    catch (const std::exception &e)
+    {
+      MERROR("Failed to remove tx from txpool: " << e.what());
+      return false;
+    }
+
+    m_txs_by_fee_and_receive_time.erase(sorted_it);
     return true;
   }
   //---------------------------------------------------------------------------------
@@ -284,110 +488,290 @@ namespace cryptonote
   //---------------------------------------------------------------------------------
   sorted_tx_container::iterator tx_memory_pool::find_tx_in_sorted_container(const crypto::hash& id) const
   {
-    return std::find_if( m_txs_by_fee.begin(), m_txs_by_fee.end()
+    return std::find_if( m_txs_by_fee_and_receive_time.begin(), m_txs_by_fee_and_receive_time.end()
                        , [&](const sorted_tx_container::value_type& a){
                          return a.second == id;
                        }
     );
   }
   //---------------------------------------------------------------------------------
-  //proper tx_pool handling courtesy of CryptoZoidberg and Boolberry
+  //TODO: investigate whether boolean return is appropriate
   bool tx_memory_pool::remove_stuck_transactions()
   {
     CRITICAL_REGION_LOCAL(m_transactions_lock);
-    for(auto it = m_transactions.begin(); it!= m_transactions.end();)
-    {
-      uint64_t tx_age = time(nullptr) - it->second.receive_time;
+    CRITICAL_REGION_LOCAL1(m_blockchain);
+    std::unordered_set<crypto::hash> remove;
+    m_blockchain.for_all_txpool_txes([this, &remove](const crypto::hash &txid, const txpool_tx_meta_t &meta, const cryptonote::blobdata*) {
+      uint64_t tx_age = time(nullptr) - meta.receive_time;
 
-      if((tx_age > CRYPTONOTE_MEMPOOL_TX_LIVETIME && !it->second.kept_by_block) ||
-         (tx_age > CRYPTONOTE_MEMPOOL_TX_FROM_ALT_BLOCK_LIVETIME && it->second.kept_by_block) )
+      if((tx_age > CRYPTONOTE_MEMPOOL_TX_LIVETIME && !meta.kept_by_block) ||
+         (tx_age > CRYPTONOTE_MEMPOOL_TX_FROM_ALT_BLOCK_LIVETIME && meta.kept_by_block) )
       {
-        LOG_PRINT_L1("Tx " << it->first << " removed from tx pool due to outdated, age: " << tx_age );
-        remove_transaction_keyimages(it->second.tx);
-        auto sorted_it = find_tx_in_sorted_container(it->first);
-        if (sorted_it == m_txs_by_fee.end())
+        LOG_PRINT_L1("Tx " << txid << " removed from tx pool due to outdated, age: " << tx_age );
+        auto sorted_it = find_tx_in_sorted_container(txid);
+        if (sorted_it == m_txs_by_fee_and_receive_time.end())
         {
-          LOG_PRINT_L1("Removing tx " << it->first << " from tx pool, but it was not found in the sorted txs container!");
+          LOG_PRINT_L1("Removing tx " << txid << " from tx pool, but it was not found in the sorted txs container!");
         }
         else
         {
-          m_txs_by_fee.erase(sorted_it);
+          m_txs_by_fee_and_receive_time.erase(sorted_it);
         }
-        m_transactions.erase(it++);
-      }else
-        ++it;
+        m_timed_out_transactions.insert(txid);
+        remove.insert(txid);
+      }
+      return true;
+    }, false);
+
+    if (!remove.empty())
+    {
+      LockedTXN lock(m_blockchain);
+      for (const crypto::hash &txid: remove)
+      {
+        try
+        {
+          cryptonote::blobdata bd = m_blockchain.get_txpool_tx_blob(txid);
+          cryptonote::transaction tx;
+          if (!parse_and_validate_tx_from_blob(bd, tx))
+          {
+            MERROR("Failed to parse tx from txpool");
+            // continue
+          }
+          else
+          {
+            // remove first, so we only remove key images if the tx removal succeeds
+            m_blockchain.remove_txpool_tx(txid);
+            m_txpool_size -= bd.size();
+            remove_transaction_keyimages(tx);
+          }
+        }
+        catch (const std::exception &e)
+        {
+          MWARNING("Failed to remove stuck transaction: " << txid);
+          // ignore error
+        }
+      }
     }
     return true;
   }
   //---------------------------------------------------------------------------------
-  bool tx_memory_pool::get_relayable_transactions(std::list<std::pair<crypto::hash, cryptonote::transaction>> &txs) const
+  //TODO: investigate whether boolean return is appropriate
+  bool tx_memory_pool::get_relayable_transactions(std::list<std::pair<crypto::hash, cryptonote::blobdata>> &txs) const
   {
     CRITICAL_REGION_LOCAL(m_transactions_lock);
-    const time_t now = time(NULL);
-    for(auto it = m_transactions.begin(); it!= m_transactions.end();)
-    {
+    CRITICAL_REGION_LOCAL1(m_blockchain);
+    const uint64_t now = time(NULL);
+    m_blockchain.for_all_txpool_txes([this, now, &txs](const crypto::hash &txid, const txpool_tx_meta_t &meta, const cryptonote::blobdata *){
       // 0 fee transactions are never relayed
-      if(it->second.fee > 0 && now - it->second.last_relayed_time > get_relay_delay(now, it->second.receive_time))
+      if(meta.fee > 0 && !meta.do_not_relay && now - meta.last_relayed_time > get_relay_delay(now, meta.receive_time))
       {
         // if the tx is older than half the max lifetime, we don't re-relay it, to avoid a problem
         // mentioned by smooth where nodes would flush txes at slightly different times, causing
         // flushed txes to be re-added when received from a node which was just about to flush it
-        time_t max_age = it->second.kept_by_block ? CRYPTONOTE_MEMPOOL_TX_FROM_ALT_BLOCK_LIVETIME : CRYPTONOTE_MEMPOOL_TX_LIVETIME;
-        if (now - it->second.receive_time <= max_age / 2)
+        uint64_t max_age = meta.kept_by_block ? CRYPTONOTE_MEMPOOL_TX_FROM_ALT_BLOCK_LIVETIME : CRYPTONOTE_MEMPOOL_TX_LIVETIME;
+        if (now - meta.receive_time <= max_age / 2)
         {
-          txs.push_back(std::make_pair(it->first, it->second.tx));
+          try
+          {
+            cryptonote::blobdata bd = m_blockchain.get_txpool_tx_blob(txid);
+            txs.push_back(std::make_pair(txid, bd));
+          }
+          catch (const std::exception &e)
+          {
+            MERROR("Failed to get transaction blob from db");
+            // ignore error
+          }
         }
       }
-      ++it;
-    }
+      return true;
+    }, false);
     return true;
   }
   //---------------------------------------------------------------------------------
-  void tx_memory_pool::set_relayed(const std::list<std::pair<crypto::hash, cryptonote::transaction>> &txs)
+  void tx_memory_pool::set_relayed(const std::list<std::pair<crypto::hash, cryptonote::blobdata>> &txs)
   {
     CRITICAL_REGION_LOCAL(m_transactions_lock);
+    CRITICAL_REGION_LOCAL1(m_blockchain);
     const time_t now = time(NULL);
+    LockedTXN lock(m_blockchain);
     for (auto it = txs.begin(); it != txs.end(); ++it)
     {
-      auto i = m_transactions.find(it->first);
-      if (i != m_transactions.end())
-        i->second.last_relayed_time = now;
+      try
+      {
+        txpool_tx_meta_t meta;
+        if (m_blockchain.get_txpool_tx_meta(it->first, meta))
+        {
+          meta.relayed = true;
+          meta.last_relayed_time = now;
+          m_blockchain.update_txpool_tx(it->first, meta);
+        }
+      }
+      catch (const std::exception &e)
+      {
+        MERROR("Failed to update txpool transaction metadata: " << e.what());
+        // continue
+      }
     }
   }
   //---------------------------------------------------------------------------------
-  size_t tx_memory_pool::get_transactions_count() const
+  size_t tx_memory_pool::get_transactions_count(bool include_unrelayed_txes) const
   {
     CRITICAL_REGION_LOCAL(m_transactions_lock);
-    return m_transactions.size();
+    CRITICAL_REGION_LOCAL1(m_blockchain);
+    return m_blockchain.get_txpool_tx_count(include_unrelayed_txes);
   }
   //---------------------------------------------------------------------------------
-  void tx_memory_pool::get_transactions(std::list<transaction>& txs) const
+  void tx_memory_pool::get_transactions(std::list<transaction>& txs, bool include_unrelayed_txes) const
   {
     CRITICAL_REGION_LOCAL(m_transactions_lock);
-    BOOST_FOREACH(const auto& tx_vt, m_transactions)
-      txs.push_back(tx_vt.second.tx);
+    CRITICAL_REGION_LOCAL1(m_blockchain);
+    m_blockchain.for_all_txpool_txes([&txs](const crypto::hash &txid, const txpool_tx_meta_t &meta, const cryptonote::blobdata *bd){
+      transaction tx;
+      if (!parse_and_validate_tx_from_blob(*bd, tx))
+      {
+        MERROR("Failed to parse tx from txpool");
+        // continue
+        return true;
+      }
+      txs.push_back(tx);
+      return true;
+    }, true, include_unrelayed_txes);
   }
   //------------------------------------------------------------------
-  bool tx_memory_pool::get_transactions_and_spent_keys_info(std::vector<tx_info>& tx_infos, std::vector<spent_key_image_info>& key_image_infos) const
+  void tx_memory_pool::get_transaction_hashes(std::vector<crypto::hash>& txs, bool include_unrelayed_txes) const
   {
     CRITICAL_REGION_LOCAL(m_transactions_lock);
-    for (const auto& tx_vt : m_transactions)
+    CRITICAL_REGION_LOCAL1(m_blockchain);
+    m_blockchain.for_all_txpool_txes([&txs](const crypto::hash &txid, const txpool_tx_meta_t &meta, const cryptonote::blobdata *bd){
+      txs.push_back(txid);
+      return true;
+    }, false, include_unrelayed_txes);
+  }
+  //------------------------------------------------------------------
+  void tx_memory_pool::get_transaction_backlog(std::vector<tx_backlog_entry>& backlog, bool include_unrelayed_txes) const
+  {
+    CRITICAL_REGION_LOCAL(m_transactions_lock);
+    CRITICAL_REGION_LOCAL1(m_blockchain);
+    const uint64_t now = time(NULL);
+    m_blockchain.for_all_txpool_txes([&backlog, now](const crypto::hash &txid, const txpool_tx_meta_t &meta, const cryptonote::blobdata *bd){
+      backlog.push_back({meta.blob_size, meta.fee, meta.receive_time - now});
+      return true;
+    }, false, include_unrelayed_txes);
+  }
+  //------------------------------------------------------------------
+  void tx_memory_pool::get_transaction_stats(struct txpool_stats& stats, bool include_unrelayed_txes) const
+  {
+    CRITICAL_REGION_LOCAL(m_transactions_lock);
+    CRITICAL_REGION_LOCAL1(m_blockchain);
+    const uint64_t now = time(NULL);
+    std::map<uint64_t, txpool_histo> agebytes;
+    stats.txs_total = m_blockchain.get_txpool_tx_count(include_unrelayed_txes);
+    std::vector<uint32_t> sizes;
+    sizes.reserve(stats.txs_total);
+    m_blockchain.for_all_txpool_txes([&stats, &sizes, now, &agebytes](const crypto::hash &txid, const txpool_tx_meta_t &meta, const cryptonote::blobdata *bd){
+      sizes.push_back(meta.blob_size);
+      stats.bytes_total += meta.blob_size;
+      if (!stats.bytes_min || meta.blob_size < stats.bytes_min)
+        stats.bytes_min = meta.blob_size;
+      if (meta.blob_size > stats.bytes_max)
+        stats.bytes_max = meta.blob_size;
+      if (!meta.relayed)
+        stats.num_not_relayed++;
+      stats.fee_total += meta.fee;
+      if (!stats.oldest || meta.receive_time < stats.oldest)
+        stats.oldest = meta.receive_time;
+      if (meta.receive_time < now - 600)
+        stats.num_10m++;
+      if (meta.last_failed_height)
+        stats.num_failing++;
+      uint64_t age = now - meta.receive_time + (now == meta.receive_time);
+      agebytes[age].txs++;
+      agebytes[age].bytes += meta.blob_size;
+      if (meta.double_spend_seen)
+        ++stats.num_double_spends;
+      return true;
+      }, false, include_unrelayed_txes);
+    stats.bytes_med = epee::misc_utils::median(sizes);
+    if (stats.txs_total > 1)
     {
-      tx_info txi;
-      const tx_details& txd = tx_vt.second;
-      txi.id_hash = epee::string_tools::pod_to_hex(tx_vt.first);
-      txi.tx_json = obj_to_json_str(*const_cast<transaction*>(&txd.tx));
-      txi.blob_size = txd.blob_size;
-      txi.fee = txd.fee;
-      txi.kept_by_block = txd.kept_by_block;
-      txi.max_used_block_height = txd.max_used_block_height;
-      txi.max_used_block_id_hash = epee::string_tools::pod_to_hex(txd.max_used_block_id);
-      txi.last_failed_height = txd.last_failed_height;
-      txi.last_failed_id_hash = epee::string_tools::pod_to_hex(txd.last_failed_id);
-      txi.receive_time = txd.receive_time;
-      tx_infos.push_back(txi);
+      /* looking for 98th percentile */
+      size_t end = stats.txs_total * 0.02;
+      uint64_t delta, factor;
+      std::map<uint64_t, txpool_histo>::iterator it, i2;
+      if (end)
+      {
+        /* If enough txs, spread the first 98% of results across
+         * the first 9 bins, drop final 2% in last bin.
+         */
+        it=agebytes.end();
+        for (size_t n=0; n <= end; n++, it--);
+        stats.histo_98pc = it->first;
+        factor = 9;
+        delta = it->first;
+        stats.histo.resize(10);
+      } else
+      {
+        /* If not enough txs, don't reserve the last slot;
+         * spread evenly across all 10 bins.
+         */
+        stats.histo_98pc = 0;
+        it = agebytes.end();
+        factor = stats.txs_total > 9 ? 10 : stats.txs_total;
+        delta = now - stats.oldest;
+        stats.histo.resize(factor);
+      }
+      if (!delta)
+        delta = 1;
+      for (i2 = agebytes.begin(); i2 != it; i2++)
+      {
+        size_t i = (i2->first * factor - 1) / delta;
+        stats.histo[i].txs += i2->second.txs;
+        stats.histo[i].bytes += i2->second.bytes;
+      }
+      for (; i2 != agebytes.end(); i2++)
+      {
+        stats.histo[factor].txs += i2->second.txs;
+        stats.histo[factor].bytes += i2->second.bytes;
+      }
     }
+  }
+  //------------------------------------------------------------------
+  //TODO: investigate whether boolean return is appropriate
+  bool tx_memory_pool::get_transactions_and_spent_keys_info(std::vector<tx_info>& tx_infos, std::vector<spent_key_image_info>& key_image_infos, bool include_sensitive_data) const
+  {
+    CRITICAL_REGION_LOCAL(m_transactions_lock);
+    CRITICAL_REGION_LOCAL1(m_blockchain);
+    m_blockchain.for_all_txpool_txes([&tx_infos, key_image_infos, include_sensitive_data](const crypto::hash &txid, const txpool_tx_meta_t &meta, const cryptonote::blobdata *bd){
+      tx_info txi;
+      txi.id_hash = epee::string_tools::pod_to_hex(txid);
+      txi.tx_blob = *bd;
+      transaction tx;
+      if (!parse_and_validate_tx_from_blob(*bd, tx))
+      {
+        MERROR("Failed to parse tx from txpool");
+        // continue
+        return true;
+      }
+      txi.tx_json = obj_to_json_str(tx);
+      txi.blob_size = meta.blob_size;
+      txi.fee = meta.fee;
+      txi.kept_by_block = meta.kept_by_block;
+      txi.max_used_block_height = meta.max_used_block_height;
+      txi.max_used_block_id_hash = epee::string_tools::pod_to_hex(meta.max_used_block_id);
+      txi.last_failed_height = meta.last_failed_height;
+      txi.last_failed_id_hash = epee::string_tools::pod_to_hex(meta.last_failed_id);
+      // In restricted mode we do not include this data:
+      txi.receive_time = include_sensitive_data ? meta.receive_time : 0;
+      txi.relayed = meta.relayed;
+      // In restricted mode we do not include this data:
+      txi.last_relayed_time = include_sensitive_data ? meta.last_relayed_time : 0;
+      txi.do_not_relay = meta.do_not_relay;
+      txi.double_spend_seen = meta.double_spend_seen;
+      tx_infos.push_back(txi);
+      return true;
+    }, true, include_sensitive_data);
 
+    txpool_tx_meta_t meta;
     for (const key_images_container::value_type& kee : m_spent_key_images) {
       const crypto::key_image& k_image = kee.first;
       const std::unordered_set<crypto::hash>& kei_image_set = kee.second;
@@ -395,21 +779,106 @@ namespace cryptonote
       ki.id_hash = epee::string_tools::pod_to_hex(k_image);
       for (const crypto::hash& tx_id_hash : kei_image_set)
       {
+        if (!include_sensitive_data)
+        {
+          try
+          {
+            if (!m_blockchain.get_txpool_tx_meta(tx_id_hash, meta))
+            {
+              MERROR("Failed to get tx meta from txpool");
+              return false;
+            }
+            if (!meta.relayed)
+              // Do not include that transaction if in restricted mode and it's not relayed
+              continue;
+          }
+          catch (const std::exception &e)
+          {
+            MERROR("Failed to get tx meta from txpool: " << e.what());
+            return false;
+          }
+        }
         ki.txs_hashes.push_back(epee::string_tools::pod_to_hex(tx_id_hash));
       }
-      key_image_infos.push_back(ki);
+      // Only return key images for which we have at least one tx that we can show for them
+      if (!ki.txs_hashes.empty())
+        key_image_infos.push_back(ki);
     }
     return true;
   }
   //---------------------------------------------------------------------------------
-  bool tx_memory_pool::get_transaction(const crypto::hash& id, transaction& tx) const
+  bool tx_memory_pool::get_pool_for_rpc(std::vector<cryptonote::rpc::tx_in_pool>& tx_infos, cryptonote::rpc::key_images_with_tx_hashes& key_image_infos) const
   {
     CRITICAL_REGION_LOCAL(m_transactions_lock);
-    auto it = m_transactions.find(id);
-    if(it == m_transactions.end())
-      return false;
-    tx = it->second.tx;
+    CRITICAL_REGION_LOCAL1(m_blockchain);
+    m_blockchain.for_all_txpool_txes([&tx_infos, key_image_infos](const crypto::hash &txid, const txpool_tx_meta_t &meta, const cryptonote::blobdata *bd){
+      cryptonote::rpc::tx_in_pool txi;
+      txi.tx_hash = txid;
+      transaction tx;
+      if (!parse_and_validate_tx_from_blob(*bd, tx))
+      {
+        MERROR("Failed to parse tx from txpool");
+        // continue
+        return true;
+      }
+      txi.tx = tx;
+      txi.blob_size = meta.blob_size;
+      txi.fee = meta.fee;
+      txi.kept_by_block = meta.kept_by_block;
+      txi.max_used_block_height = meta.max_used_block_height;
+      txi.max_used_block_hash = meta.max_used_block_id;
+      txi.last_failed_block_height = meta.last_failed_height;
+      txi.last_failed_block_hash = meta.last_failed_id;
+      txi.receive_time = meta.receive_time;
+      txi.relayed = meta.relayed;
+      txi.last_relayed_time = meta.last_relayed_time;
+      txi.do_not_relay = meta.do_not_relay;
+      txi.double_spend_seen = meta.double_spend_seen;
+      tx_infos.push_back(txi);
+      return true;
+    }, true, false);
+
+    for (const key_images_container::value_type& kee : m_spent_key_images) {
+      std::vector<crypto::hash> tx_hashes;
+      const std::unordered_set<crypto::hash>& kei_image_set = kee.second;
+      for (const crypto::hash& tx_id_hash : kei_image_set)
+      {
+        tx_hashes.push_back(tx_id_hash);
+      }
+
+      const crypto::key_image& k_image = kee.first;
+      key_image_infos[k_image] = tx_hashes;
+    }
     return true;
+  }
+  //---------------------------------------------------------------------------------
+  bool tx_memory_pool::check_for_key_images(const std::vector<crypto::key_image>& key_images, std::vector<bool> spent) const
+  {
+    CRITICAL_REGION_LOCAL(m_transactions_lock);
+    CRITICAL_REGION_LOCAL1(m_blockchain);
+
+    spent.clear();
+
+    for (const auto& image : key_images)
+    {
+      spent.push_back(m_spent_key_images.find(image) == m_spent_key_images.end() ? false : true);
+    }
+
+    return true;
+  }
+  //---------------------------------------------------------------------------------
+  bool tx_memory_pool::get_transaction(const crypto::hash& id, cryptonote::blobdata& txblob) const
+  {
+    CRITICAL_REGION_LOCAL(m_transactions_lock);
+    CRITICAL_REGION_LOCAL1(m_blockchain);
+    try
+    {
+      return m_blockchain.get_txpool_tx_blob(id, txblob);
+    }
+    catch (const std::exception &e)
+    {
+      return false;
+    }
   }
   //---------------------------------------------------------------------------------
   bool tx_memory_pool::on_blockchain_inc(uint64_t new_block_height, const crypto::hash& top_block_id)
@@ -425,15 +894,15 @@ namespace cryptonote
   bool tx_memory_pool::have_tx(const crypto::hash &id) const
   {
     CRITICAL_REGION_LOCAL(m_transactions_lock);
-    if(m_transactions.count(id))
-      return true;
-    return false;
+    CRITICAL_REGION_LOCAL1(m_blockchain);
+    return m_blockchain.get_db().txpool_has_tx(id);
   }
   //---------------------------------------------------------------------------------
   bool tx_memory_pool::have_tx_keyimges_as_spent(const transaction& tx) const
   {
     CRITICAL_REGION_LOCAL(m_transactions_lock);
-    BOOST_FOREACH(const auto& in, tx.vin)
+    CRITICAL_REGION_LOCAL1(m_blockchain);
+    for(const auto& in: tx.vin)
     {
       CHECKED_GET_SPECIFIC_VARIANT(in, const txin_to_key, tokey_in, true);//should never fail
       if(have_tx_keyimg_as_spent(tokey_in.k_image))
@@ -458,7 +927,7 @@ namespace cryptonote
     m_transactions_lock.unlock();
   }
   //---------------------------------------------------------------------------------
-  bool tx_memory_pool::is_transaction_ready_to_go(tx_details& txd) const
+  bool tx_memory_pool::is_transaction_ready_to_go(txpool_tx_meta_t& txd, transaction &tx) const
   {
     //not the best implementation at this time, sorry :(
     //check is ring_signature already checked ?
@@ -468,7 +937,8 @@ namespace cryptonote
       if(txd.last_failed_id != null_hash && m_blockchain.get_current_blockchain_height() > txd.last_failed_height && txd.last_failed_id == m_blockchain.get_block_id_by_height(txd.last_failed_height))
         return false;//we already sure that this tx is broken for this height
 
-      if(!m_blockchain.check_tx_inputs(txd.tx, txd.max_used_block_height, txd.max_used_block_id))
+      tx_verification_context tvc;
+      if(!m_blockchain.check_tx_inputs(tx, txd.max_used_block_height, txd.max_used_block_id, tvc))
       {
         txd.last_failed_height = m_blockchain.get_current_blockchain_height()-1;
         txd.last_failed_id = m_blockchain.get_block_id_by_height(txd.last_failed_height);
@@ -478,13 +948,14 @@ namespace cryptonote
     {
       if(txd.max_used_block_height >= m_blockchain.get_current_blockchain_height())
         return false;
-      if(m_blockchain.get_block_id_by_height(txd.max_used_block_height) != txd.max_used_block_id)
+      if(true)
       {
         //if we already failed on this height and id, skip actual ring signature check
         if(txd.last_failed_id == m_blockchain.get_block_id_by_height(txd.last_failed_height))
           return false;
         //check ring signature again, it is possible (with very small chance) that this transaction become again valid
-        if(!m_blockchain.check_tx_inputs(txd.tx, txd.max_used_block_height, txd.max_used_block_id))
+        tx_verification_context tvc;
+        if(!m_blockchain.check_tx_inputs(tx, txd.max_used_block_height, txd.max_used_block_id, tvc))
         {
           txd.last_failed_height = m_blockchain.get_current_blockchain_height()-1;
           txd.last_failed_id = m_blockchain.get_block_id_by_height(txd.last_failed_height);
@@ -493,8 +964,11 @@ namespace cryptonote
       }
     }
     //if we here, transaction seems valid, but, anyway, check for key_images collisions with blockchain, just to be sure
-    if(m_blockchain.have_tx_keyimges_as_spent(txd.tx))
+    if(m_blockchain.have_tx_keyimges_as_spent(tx))
+    {
+      txd.double_spend_seen = true;
       return false;
+    }
 
     //transaction is ok.
     return true;
@@ -522,144 +996,327 @@ namespace cryptonote
     return true;
   }
   //---------------------------------------------------------------------------------
+  void tx_memory_pool::mark_double_spend(const transaction &tx)
+  {
+    CRITICAL_REGION_LOCAL(m_transactions_lock);
+    CRITICAL_REGION_LOCAL1(m_blockchain);
+    LockedTXN lock(m_blockchain);
+    for(size_t i = 0; i!= tx.vin.size(); i++)
+    {
+      CHECKED_GET_SPECIFIC_VARIANT(tx.vin[i], const txin_to_key, itk, void());
+      const key_images_container::const_iterator it = m_spent_key_images.find(itk.k_image);
+      if (it != m_spent_key_images.end())
+      {
+        for (const crypto::hash &txid: it->second)
+        {
+          txpool_tx_meta_t meta;
+          if (!m_blockchain.get_txpool_tx_meta(txid, meta))
+          {
+            MERROR("Failed to find tx meta in txpool");
+            // continue, not fatal
+            continue;
+          }
+          if (!meta.double_spend_seen)
+          {
+            MDEBUG("Marking " << txid << " as double spending " << itk.k_image);
+            meta.double_spend_seen = true;
+            try
+            {
+              m_blockchain.update_txpool_tx(txid, meta);
+            }
+            catch (const std::exception &e)
+            {
+              MERROR("Failed to update tx meta: " << e.what());
+              // continue, not fatal
+            }
+          }
+        }
+      }
+    }
+  }
+  //---------------------------------------------------------------------------------
   std::string tx_memory_pool::print_pool(bool short_format) const
   {
     std::stringstream ss;
     CRITICAL_REGION_LOCAL(m_transactions_lock);
-    for (const transactions_container::value_type& txe : m_transactions) {
-      const tx_details& txd = txe.second;
-      ss << "id: " << txe.first << std::endl;
+    CRITICAL_REGION_LOCAL1(m_blockchain);
+    m_blockchain.for_all_txpool_txes([&ss, short_format](const crypto::hash &txid, const txpool_tx_meta_t &meta, const cryptonote::blobdata *txblob) {
+      ss << "id: " << txid << std::endl;
       if (!short_format) {
-        ss << obj_to_json_str(*const_cast<transaction*>(&txd.tx)) << std::endl;
+        cryptonote::transaction tx;
+        if (!parse_and_validate_tx_from_blob(*txblob, tx))
+        {
+          MERROR("Failed to parse tx from txpool");
+          return true; // continue
+        }
+        ss << obj_to_json_str(tx) << std::endl;
       }
-      ss << "blob_size: " << txd.blob_size << std::endl
-        << "fee: " << print_money(txd.fee) << std::endl
-        << "kept_by_block: " << (txd.kept_by_block ? 'T' : 'F') << std::endl
-        << "max_used_block_height: " << txd.max_used_block_height << std::endl
-        << "max_used_block_id: " << txd.max_used_block_id << std::endl
-        << "last_failed_height: " << txd.last_failed_height << std::endl
-        << "last_failed_id: " << txd.last_failed_id << std::endl;
-    }
+      ss << "blob_size: " << meta.blob_size << std::endl
+        << "fee: " << print_money(meta.fee) << std::endl
+        << "kept_by_block: " << (meta.kept_by_block ? 'T' : 'F') << std::endl
+        << "double_spend_seen: " << (meta.double_spend_seen ? 'T' : 'F') << std::endl
+        << "max_used_block_height: " << meta.max_used_block_height << std::endl
+        << "max_used_block_id: " << meta.max_used_block_id << std::endl
+        << "last_failed_height: " << meta.last_failed_height << std::endl
+        << "last_failed_id: " << meta.last_failed_id << std::endl;
+      return true;
+    }, !short_format);
 
     return ss.str();
   }
   //---------------------------------------------------------------------------------
-  bool tx_memory_pool::fill_block_template(block &bl, size_t median_size, uint64_t already_generated_coins, size_t &total_size, uint64_t &fee)
+  //TODO: investigate whether boolean return is appropriate
+  bool tx_memory_pool::fill_block_template(block &bl, size_t median_size, uint64_t already_generated_coins, size_t &total_size, uint64_t &fee, uint64_t &expected_reward, uint8_t version)
   {
     // Warning: This function takes already_generated_
     // coins as an argument and appears to do nothing
     // with it.
 
     CRITICAL_REGION_LOCAL(m_transactions_lock);
+    CRITICAL_REGION_LOCAL1(m_blockchain);
 
+    uint64_t best_coinbase = 0, coinbase = 0;
     total_size = 0;
     fee = 0;
+    
+    //baseline empty block
+    get_block_reward(median_size, total_size, already_generated_coins, best_coinbase, version);
 
-    // Maximum block size is 130% of the median block size.  This gives a
-    // little extra headroom for the max size transaction.
-    size_t max_total_size = (130 * median_size) / 100 - CRYPTONOTE_COINBASE_BLOB_RESERVED_SIZE;
+
+    size_t max_total_size_pre_v5 = (130 * median_size) / 100 - CRYPTONOTE_COINBASE_BLOB_RESERVED_SIZE;
+    size_t max_total_size_v5 = 2 * median_size - CRYPTONOTE_COINBASE_BLOB_RESERVED_SIZE;
+    size_t max_total_size = version >= 5 ? max_total_size_v5 : max_total_size_pre_v5;
     std::unordered_set<crypto::key_image> k_images;
 
-    auto sorted_it = m_txs_by_fee.begin();
-    while (sorted_it != m_txs_by_fee.end())
+    LOG_PRINT_L2("Filling block template, median size " << median_size << ", " << m_txs_by_fee_and_receive_time.size() << " txes in the pool");
+
+    LockedTXN lock(m_blockchain);
+
+    auto sorted_it = m_txs_by_fee_and_receive_time.begin();
+    while (sorted_it != m_txs_by_fee_and_receive_time.end())
     {
-      auto tx_it = m_transactions.find(sorted_it->second);
+      txpool_tx_meta_t meta;
+      if (!m_blockchain.get_txpool_tx_meta(sorted_it->second, meta))
+      {
+        MERROR("  failed to find tx meta");
+        continue;
+      }
+      LOG_PRINT_L2("Considering " << sorted_it->second << ", size " << meta.blob_size << ", current block size " << total_size << "/" << max_total_size << ", current coinbase " << print_money(best_coinbase));
 
       // Can not exceed maximum block size
-      if (max_total_size < total_size + tx_it->second.blob_size)
+      if (max_total_size < total_size + meta.blob_size)
       {
+        LOG_PRINT_L2("  would exceed maximum block size");
         sorted_it++;
         continue;
       }
 
-      // If adding this tx will make the block size
-      // greater than CRYPTONOTE_GETBLOCKTEMPLATE_MAX
-      // _BLOCK_SIZE bytes, reject the tx; this will
-      // keep block sizes from becoming too unwieldly
-      // to propagate at 60s block times.
-      if ( (total_size + tx_it->second.blob_size) > CRYPTONOTE_GETBLOCKTEMPLATE_MAX_BLOCK_SIZE )
+      // start using the optimal filling algorithm from v5
+      if (version >= 5)
       {
+        // If we're getting lower coinbase tx,
+        // stop including more tx
+        uint64_t block_reward;
+        if(!get_block_reward(median_size, total_size + meta.blob_size, already_generated_coins, block_reward, version))
+        {
+          LOG_PRINT_L2("  would exceed maximum block size");
+          sorted_it++;
+          continue;
+        }
+        coinbase = block_reward + fee + meta.fee;
+        if (coinbase < template_accept_threshold(best_coinbase))
+        {
+          LOG_PRINT_L2("  would decrease coinbase to " << print_money(coinbase));
+          sorted_it++;
+          continue;
+        }
+      }
+      else
+      {
+        // If we've exceeded the penalty free size,
+        // stop including more tx
+        if (total_size > median_size)
+        {
+          LOG_PRINT_L2("  would exceed median block size");
+          break;
+        }
+      }
+
+      cryptonote::blobdata txblob = m_blockchain.get_txpool_tx_blob(sorted_it->second);
+      cryptonote::transaction tx;
+      if (!parse_and_validate_tx_from_blob(txblob, tx))
+      {
+        MERROR("Failed to parse tx from txpool");
         sorted_it++;
         continue;
       }
-
-      // If we've exceeded the penalty free size,
-      // stop including more tx
-      if (total_size > median_size)
-        break;
 
       // Skip transactions that are not ready to be
       // included into the blockchain or that are
       // missing key images
-      if (!is_transaction_ready_to_go(tx_it->second) || have_key_images(k_images, tx_it->second.tx))
+      const cryptonote::txpool_tx_meta_t original_meta = meta;
+      bool ready = is_transaction_ready_to_go(meta, tx);
+      if (memcmp(&original_meta, &meta, sizeof(meta)))
       {
+        try
+	{
+	  m_blockchain.update_txpool_tx(sorted_it->second, meta);
+	}
+        catch (const std::exception &e)
+	{
+	  MERROR("Failed to update tx meta: " << e.what());
+	  // continue, not fatal
+	}
+      }
+      if (!ready)
+      {
+        LOG_PRINT_L2("  not ready to go");
+        sorted_it++;
+        continue;
+      }
+      if (have_key_images(k_images, tx))
+      {
+        LOG_PRINT_L2("  key images already seen");
         sorted_it++;
         continue;
       }
 
-      bl.tx_hashes.push_back(tx_it->first);
-      total_size += tx_it->second.blob_size;
-      fee += tx_it->second.fee;
-      append_key_images(k_images, tx_it->second.tx);
+      bl.tx_hashes.push_back(sorted_it->second);
+      total_size += meta.blob_size;
+      fee += meta.fee;
+      best_coinbase = coinbase;
+      append_key_images(k_images, tx);
       sorted_it++;
+      LOG_PRINT_L2("  added, new block size " << total_size << "/" << max_total_size << ", coinbase " << print_money(best_coinbase));
     }
 
+    expected_reward = best_coinbase;
+    LOG_PRINT_L2("Block template filled with " << bl.tx_hashes.size() << " txes, size "
+        << total_size << "/" << max_total_size << ", coinbase " << print_money(best_coinbase)
+        << " (including " << print_money(fee) << " in fees)");
     return true;
   }
   //---------------------------------------------------------------------------------
-  bool tx_memory_pool::init(const std::string& config_folder)
+  size_t tx_memory_pool::validate(uint8_t version)
   {
     CRITICAL_REGION_LOCAL(m_transactions_lock);
+    CRITICAL_REGION_LOCAL1(m_blockchain);
+    size_t tx_size_limit = get_transaction_size_limit(version);
+    std::unordered_set<crypto::hash> remove;
 
-    m_config_folder = config_folder;
-    std::string state_file_path = config_folder + "/" + CRYPTONOTE_POOLDATA_FILENAME;
-    boost::system::error_code ec;
-    if(!boost::filesystem::exists(state_file_path, ec))
-      return true;
-    bool res = tools::unserialize_obj_from_file(*this, state_file_path);
-    if(!res)
-    {
-      LOG_PRINT_L1("Failed to load memory pool from file " << state_file_path);
-
-      m_transactions.clear();
-      m_txs_by_fee.clear();
-      m_spent_key_images.clear();
-    }
-
-    for (auto it = m_transactions.begin(); it != m_transactions.end(); ) {
-      if (it->second.blob_size >= TRANSACTION_SIZE_LIMIT) {
-        LOG_PRINT_L1("Transaction " << get_transaction_hash(it->second.tx) << " is too big (" << it->second.blob_size << " bytes), removing it from pool");
-        remove_transaction_keyimages(it->second.tx);
-        m_transactions.erase(it);
+    m_txpool_size = 0;
+    m_blockchain.for_all_txpool_txes([this, &remove, tx_size_limit](const crypto::hash &txid, const txpool_tx_meta_t &meta, const cryptonote::blobdata*) {
+      m_txpool_size += meta.blob_size;
+      if (meta.blob_size > tx_size_limit) {
+        LOG_PRINT_L1("Transaction " << txid << " is too big (" << meta.blob_size << " bytes), removing it from pool");
+        remove.insert(txid);
       }
-      it++;
-    }
+      else if (m_blockchain.have_tx(txid)) {
+        LOG_PRINT_L1("Transaction " << txid << " is in the blockchain, removing it from pool");
+        remove.insert(txid);
+      }
+      return true;
+    }, false);
 
-    // no need to store queue of sorted transactions, as it's easy to generate.
-    for (const auto& tx : m_transactions)
+    size_t n_removed = 0;
+    if (!remove.empty())
     {
-      m_txs_by_fee.emplace((double)tx.second.blob_size / tx.second.fee, tx.first);
+      LockedTXN lock(m_blockchain);
+      for (const crypto::hash &txid: remove)
+      {
+        try
+        {
+          cryptonote::blobdata txblob = m_blockchain.get_txpool_tx_blob(txid);
+          cryptonote::transaction tx;
+          if (!parse_and_validate_tx_from_blob(txblob, tx))
+          {
+            MERROR("Failed to parse tx from txpool");
+            continue;
+          }
+          // remove tx from db first
+          m_blockchain.remove_txpool_tx(txid);
+          m_txpool_size -= txblob.size();
+          remove_transaction_keyimages(tx);
+          auto sorted_it = find_tx_in_sorted_container(txid);
+          if (sorted_it == m_txs_by_fee_and_receive_time.end())
+          {
+            LOG_PRINT_L1("Removing tx " << txid << " from tx pool, but it was not found in the sorted txs container!");
+          }
+          else
+          {
+            m_txs_by_fee_and_receive_time.erase(sorted_it);
+          }
+          ++n_removed;
+        }
+        catch (const std::exception &e)
+        {
+          MERROR("Failed to remove invalid tx from pool");
+          // continue
+        }
+      }
     }
+    return n_removed;
+  }
+  //---------------------------------------------------------------------------------
+  bool tx_memory_pool::init(size_t max_txpool_size)
+  {
+    CRITICAL_REGION_LOCAL(m_transactions_lock);
+    CRITICAL_REGION_LOCAL1(m_blockchain);
 
-    // Ignore deserialization error
+    m_txpool_max_size = max_txpool_size ? max_txpool_size : DEFAULT_TXPOOL_MAX_SIZE;
+    m_txs_by_fee_and_receive_time.clear();
+    m_spent_key_images.clear();
+    m_txpool_size = 0;
+    std::vector<crypto::hash> remove;
+
+    // first add the not kept by block, then the kept by block,
+    // to avoid rejection due to key image collision
+    for (int pass = 0; pass < 2; ++pass)
+    {
+      const bool kept = pass == 1;
+      bool r = m_blockchain.for_all_txpool_txes([this, &remove, kept](const crypto::hash &txid, const txpool_tx_meta_t &meta, const cryptonote::blobdata *bd) {
+        if (!!kept != !!meta.kept_by_block)
+          return true;
+        cryptonote::transaction tx;
+        if (!parse_and_validate_tx_from_blob(*bd, tx))
+        {
+          MWARNING("Failed to parse tx from txpool, removing");
+          remove.push_back(txid);
+        }
+        if (!insert_key_images(tx, meta.kept_by_block))
+        {
+          MFATAL("Failed to insert key images from txpool tx");
+          return false;
+        }
+        m_txs_by_fee_and_receive_time.emplace(std::pair<double, time_t>(meta.fee / (double)meta.blob_size, meta.receive_time), txid);
+        m_txpool_size += meta.blob_size;
+        return true;
+      }, true);
+      if (!r)
+        return false;
+    }
+    if (!remove.empty())
+    {
+      LockedTXN lock(m_blockchain);
+      for (const auto &txid: remove)
+      {
+        try
+        {
+          m_blockchain.remove_txpool_tx(txid);
+        }
+        catch (const std::exception &e)
+        {
+          MWARNING("Failed to remove corrupt transaction: " << txid);
+          // ignore error
+        }
+      }
+    }
     return true;
   }
 
   //---------------------------------------------------------------------------------
   bool tx_memory_pool::deinit()
   {
-    if (!tools::create_directories_if_necessary(m_config_folder))
-    {
-      LOG_PRINT_L1("Failed to create data directory: " << m_config_folder);
-      return false;
-    }
-
-    std::string state_file_path = m_config_folder + "/" + CRYPTONOTE_POOLDATA_FILENAME;
-    bool res = tools::serialize_obj_to_file(*this, state_file_path);
-    if(!res)
-    {
-      LOG_PRINT_L1("Failed to serialize memory pool to file " << state_file_path);
-    }
     return true;
   }
 }

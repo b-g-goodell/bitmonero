@@ -1,4 +1,4 @@
-# Copyright (c) 2014-2015, The Monero Project
+# Copyright (c) 2014-2018, The Monero Project
 #
 # All rights reserved.
 #
@@ -36,17 +36,14 @@ add_executable(core_proxy
   ${core_proxy_sources}
   ${core_proxy_headers})
 target_link_libraries(core_proxy
-  LINK_PRIVATE
+  PRIVATE
     cryptonote_core
     cryptonote_protocol
     p2p
-    ${UPNP_LIBRARIES}
-    ${Boost_CHRONO_LIBRARY}
-    ${Boost_FILESYSTEM_LIBRARY}
-    ${Boost_SYSTEM_LIBRARY}
-    ${Boost_THREAD_LIBRARY}
+    version
+    epee
     ${CMAKE_THREAD_LIBS_INIT}
-    ${EXPAT_LIBRARIES})
+    ${EXTRA_LIBRARIES})
 set_property(TARGET core_proxy
   PROPERTY
     FOLDER "tests")

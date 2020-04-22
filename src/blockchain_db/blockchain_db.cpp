@@ -1,4 +1,4 @@
-// Copyright (c) 2014, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -28,14 +28,91 @@
 
 #include <boost/range/adaptor/reversed.hpp>
 
+#include "string_tools.h"
 #include "blockchain_db.h"
-#include "cryptonote_core/cryptonote_format_utils.h"
+#include "cryptonote_basic/cryptonote_format_utils.h"
 #include "profile_tools.h"
+#include "ringct/rctOps.h"
+
+#include "lmdb/db_lmdb.h"
+#ifdef BERKELEY_DB
+#include "berkeleydb/db_bdb.h"
+#endif
+
+static const char *db_types[] = {
+  "lmdb",
+#ifdef BERKELEY_DB
+  "berkeley",
+#endif
+  NULL
+};
+
+#undef MONERO_DEFAULT_LOG_CATEGORY
+#define MONERO_DEFAULT_LOG_CATEGORY "blockchain.db"
 
 using epee::string_tools::pod_to_hex;
 
 namespace cryptonote
 {
+
+bool blockchain_valid_db_type(const std::string& db_type)
+{
+  int i;
+  for (i=0; db_types[i]; i++)
+  {
+    if (db_types[i] == db_type)
+      return true;
+  }
+  return false;
+}
+
+std::string blockchain_db_types(const std::string& sep)
+{
+  int i;
+  std::string ret = "";
+  for (i=0; db_types[i]; i++)
+  {
+    if (i)
+      ret += sep;
+    ret += db_types[i];
+  }
+  return ret;
+}
+
+std::string arg_db_type_description = "Specify database type, available: " + cryptonote::blockchain_db_types(", ");
+const command_line::arg_descriptor<std::string> arg_db_type = {
+  "db-type"
+, arg_db_type_description.c_str()
+, DEFAULT_DB_TYPE
+};
+const command_line::arg_descriptor<std::string> arg_db_sync_mode = {
+  "db-sync-mode"
+, "Specify sync option, using format [safe|fast|fastest]:[sync|async]:[nblocks_per_sync]." 
+, "fast:async:1000"
+};
+const command_line::arg_descriptor<bool> arg_db_salvage  = {
+  "db-salvage"
+, "Try to salvage a blockchain database if it seems corrupted"
+, false
+};
+
+BlockchainDB *new_db(const std::string& db_type)
+{
+  if (db_type == "lmdb")
+    return new BlockchainLMDB();
+#if defined(BERKELEY_DB)
+  if (db_type == "berkeley")
+    return new BlockchainBDB();
+#endif
+  return NULL;
+}
+
+void BlockchainDB::init_options(boost::program_options::options_description& desc)
+{
+  command_line::add_arg(desc, arg_db_type);
+  command_line::add_arg(desc, arg_db_sync_mode);
+  command_line::add_arg(desc, arg_db_salvage);
+}
 
 void BlockchainDB::pop_block()
 {
@@ -46,6 +123,7 @@ void BlockchainDB::pop_block()
 
 void BlockchainDB::add_transaction(const crypto::hash& blk_hash, const transaction& tx, const crypto::hash* tx_hash_ptr)
 {
+  bool miner_tx = false;
   crypto::hash tx_hash;
   if (!tx_hash_ptr)
   {
@@ -67,6 +145,7 @@ void BlockchainDB::add_transaction(const crypto::hash& blk_hash, const transacti
     else if (tx_input.type() == typeid(txin_gen))
     {
       /* nothing to do here */
+      miner_tx = true;
     }
     else
     {
@@ -82,14 +161,31 @@ void BlockchainDB::add_transaction(const crypto::hash& blk_hash, const transacti
     }
   }
 
-  add_transaction_data(blk_hash, tx, tx_hash);
+  uint64_t tx_id = add_transaction_data(blk_hash, tx, tx_hash);
+
+  std::vector<uint64_t> amount_output_indices;
 
   // iterate tx.vout using indices instead of C++11 foreach syntax because
   // we need the index
   for (uint64_t i = 0; i < tx.vout.size(); ++i)
   {
-    add_output(tx_hash, tx.vout[i], i, tx.unlock_time);
+    // miner v2 txes have their coinbase output in one single out to save space,
+    // and we store them as rct outputs with an identity mask
+    if (miner_tx && tx.version == 2)
+    {
+      cryptonote::tx_out vout = tx.vout[i];
+      rct::key commitment = rct::zeroCommit(vout.amount);
+      vout.amount = 0;
+      amount_output_indices.push_back(add_output(tx_hash, vout, i, tx.unlock_time,
+        &commitment));
+    }
+    else
+    {
+      amount_output_indices.push_back(add_output(tx_hash, tx.vout[i], i, tx.unlock_time,
+        tx.version > 1 ? &tx.rct_signatures.outPk[i].mask : NULL));
+    }
   }
+  add_tx_amount_output_indices(tx_id, amount_output_indices);
 }
 
 uint64_t BlockchainDB::add_block( const block& blk
@@ -99,23 +195,25 @@ uint64_t BlockchainDB::add_block( const block& blk
                                 , const std::vector<transaction>& txs
                                 )
 {
+  // sanity
+  if (blk.tx_hashes.size() != txs.size())
+    throw std::runtime_error("Inconsistent tx/hashes sizes");
+
+  block_txn_start(false);
+
   TIME_MEASURE_START(time1);
   crypto::hash blk_hash = get_block_hash(blk);
   TIME_MEASURE_FINISH(time1);
   time_blk_hash += time1;
 
-  // call out to subclass implementation to add the block & metadata
-  time1 = epee::misc_utils::get_tick_count();
-  add_block(blk, block_size, cumulative_difficulty, coins_generated, blk_hash);
-  TIME_MEASURE_FINISH(time1);
-  time_add_block1 += time1;
+  uint64_t prev_height = height();
 
   // call out to add the transactions
 
   time1 = epee::misc_utils::get_tick_count();
   add_transaction(blk_hash, blk.miner_tx);
   int tx_i = 0;
-  crypto::hash tx_hash = null_hash;
+  crypto::hash tx_hash = crypto::null_hash;
   for (const transaction& tx : txs)
   {
     tx_hash = blk.tx_hashes[tx_i];
@@ -125,9 +223,24 @@ uint64_t BlockchainDB::add_block( const block& blk
   TIME_MEASURE_FINISH(time1);
   time_add_transaction += time1;
 
+  // call out to subclass implementation to add the block & metadata
+  time1 = epee::misc_utils::get_tick_count();
+  add_block(blk, block_size, cumulative_difficulty, coins_generated, blk_hash);
+  TIME_MEASURE_FINISH(time1);
+  time_add_block1 += time1;
+
+  m_hardfork->add(blk, prev_height);
+
+  block_txn_stop();
+
   ++num_calls;
 
-  return height();
+  return prev_height;
+}
+
+void BlockchainDB::set_hard_fork(HardFork* hf)
+{
+  m_hardfork = hf;
 }
 
 void BlockchainDB::pop_block(block& blk, std::vector<transaction>& txs)
@@ -165,6 +278,45 @@ void BlockchainDB::remove_transaction(const crypto::hash& tx_hash)
   remove_transaction_data(tx_hash, tx);
 }
 
+block BlockchainDB::get_block_from_height(const uint64_t& height) const
+{
+  blobdata bd = get_block_blob_from_height(height);
+  block b;
+  if (!parse_and_validate_block_from_blob(bd, b))
+    throw DB_ERROR("Failed to parse block from blob retrieved from the db");
+
+  return b;
+}
+
+block BlockchainDB::get_block(const crypto::hash& h) const
+{
+  blobdata bd = get_block_blob(h);
+  block b;
+  if (!parse_and_validate_block_from_blob(bd, b))
+    throw DB_ERROR("Failed to parse block from blob retrieved from the db");
+
+  return b;
+}
+
+bool BlockchainDB::get_tx(const crypto::hash& h, cryptonote::transaction &tx) const
+{
+  blobdata bd;
+  if (!get_tx_blob(h, bd))
+    return false;
+  if (!parse_and_validate_tx_from_blob(bd, tx))
+    throw DB_ERROR("Failed to parse transaction from blob retrieved from the db");
+
+  return true;
+}
+
+transaction BlockchainDB::get_tx(const crypto::hash& h) const
+{
+  transaction tx;
+  if (!get_tx(h, tx))
+    throw TX_DNE(std::string("tx with hash ").append(epee::string_tools::pod_to_hex(h)).append(" not found in db").c_str());
+  return tx;
+}
+
 void BlockchainDB::reset_stats()
 {
   num_calls = 0;
@@ -199,6 +351,11 @@ void BlockchainDB::show_stats()
 
 void BlockchainDB::fixup()
 {
+  if (is_read_only()) {
+    LOG_PRINT_L1("Database is opened read only - skipping fixup check");
+    return;
+  }
+
   // There was a bug that would cause key images for transactions without
   // any outputs to not be added to the spent key image set. There are two
   // instances of such transactions, in blocks 202612 and 685498.
@@ -208,6 +365,9 @@ void BlockchainDB::fixup()
   static const char * const mainnet_genesis_hex = "418015bb9ae982a1975da7d79277c2705727a56894ba0fb246adaabb1f4632e3";
   crypto::hash mainnet_genesis_hash;
   epee::string_tools::hex_to_pod(mainnet_genesis_hex, mainnet_genesis_hash );
+  set_batch_transactions(true);
+  batch_start();
+
   if (get_block_hash_from_height(0) == mainnet_genesis_hash)
   {
     // block 202612 (511 key images in 511 transactions)
@@ -743,9 +903,6 @@ void BlockchainDB::fixup()
       "633cdedeb3b96ec4f234c670254c6f721e0b368d00b48c6b26759db7d62cf52d",
     };
 
-    set_batch_transactions(true);
-    batch_start();
-
     if (height() > 202612)
     {
       for (const auto &kis: key_images_202612)
@@ -772,9 +929,8 @@ void BlockchainDB::fixup()
         }
       }
     }
-
-    batch_stop();
   }
+  batch_stop();
 }
 
 }  // namespace cryptonote

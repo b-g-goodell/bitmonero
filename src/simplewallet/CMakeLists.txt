@@ -1,4 +1,4 @@
-# Copyright (c) 2014-2015, The Monero Project
+# Copyright (c) 2014-2018, The Monero Project
 #
 # All rights reserved.
 #
@@ -27,33 +27,39 @@
 # THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 set(simplewallet_sources
-  simplewallet.cpp
-  password_container.cpp)
+  simplewallet.cpp)
 
 set(simplewallet_headers)
 
 set(simplewallet_private_headers
-  simplewallet.h
-  password_container.h)
+  simplewallet.h)
 
-bitmonero_private_headers(simplewallet
+monero_private_headers(simplewallet
   ${simplewallet_private_headers})
-bitmonero_add_executable(simplewallet
+monero_add_executable(simplewallet
   ${simplewallet_sources}
   ${simplewallet_headers}
   ${simplewallet_private_headers})
 target_link_libraries(simplewallet
-  LINK_PRIVATE
+  PRIVATE
     wallet
-    rpc
+    rpc_base
     cryptonote_core
-    crypto
+    cncrypto
     common
     mnemonics
-    p2p
-    ${UNBOUND_LIBRARY}
-    ${UPNP_LIBRARIES}
+    epee
+    ${EPEE_READLINE}
+    version
+    ${Boost_CHRONO_LIBRARY}
+    ${Boost_PROGRAM_OPTIONS_LIBRARY}
+    ${Boost_FILESYSTEM_LIBRARY}
+    ${ICU_LIBRARIES}
+    ${Boost_THREAD_LIBRARY}
     ${CMAKE_THREAD_LIBS_INIT}
+    ${GNU_READLINE_LIBRARY}
     ${EXTRA_LIBRARIES})
-add_dependencies(simplewallet
-  version)
+set_property(TARGET simplewallet
+  PROPERTY
+    OUTPUT_NAME "monero-wallet-cli")
+install(TARGETS simplewallet DESTINATION bin)

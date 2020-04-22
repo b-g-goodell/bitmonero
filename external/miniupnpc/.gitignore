@@ -4,6 +4,9 @@ build/
 *.a
 *.so
 *.dll
+*.dll.def
+*.exe
+*.lib
 *.dylib
 Makefile.bak
 miniupnpcstrings.h
@@ -23,3 +26,11 @@ jnaerator-*.jar
 miniupnpc.h.bak
 testupnpreplyparse
 validateupnpreplyparse
+testportlistingparse
+validateportlistingparse
+listdevices
+testigddescparse
+validateigddescparse
+dist/
+miniupnpc.egg-info/
+init

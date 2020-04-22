@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -29,71 +29,51 @@
 // Parts of this file are originally copyright (c) 2012-2013 The Cryptonote developers
 
 #include "command_line.h"
+#include <boost/algorithm/string/compare.hpp>
+#include <boost/algorithm/string/predicate.hpp>
+#include <unordered_set>
+#include "common/i18n.h"
+#include "cryptonote_config.h"
 #include "string_tools.h"
 
 namespace command_line
 {
-  std::string input_line(const std::string& prompt)
+  namespace
   {
-    std::cout << prompt;
+    const char* tr(const char* str)
+    {
+      return i18n_translate(str, "command_line");
+    }
+  }
 
-    std::string buf;
-    std::getline(std::cin, buf);
+  bool is_yes(const std::string& str)
+  {
+    if (str == "y" || str == "Y")
+      return true;
 
-    return epee::string_tools::trim(buf);
+    boost::algorithm::is_iequal ignore_case{};
+    if (boost::algorithm::equals("yes", str, ignore_case))
+      return true;
+    if (boost::algorithm::equals(command_line::tr("yes"), str, ignore_case))
+      return true;
 
+    return false;
+  }
+
+  bool is_no(const std::string& str)
+  {
+    if (str == "n" || str == "N")
+      return true;
+
+    boost::algorithm::is_iequal ignore_case{};
+    if (boost::algorithm::equals("no", str, ignore_case))
+      return true;
+    if (boost::algorithm::equals(command_line::tr("no"), str, ignore_case))
+      return true;
+
+    return false;
   }
 
   const arg_descriptor<bool> arg_help = {"help", "Produce help message"};
   const arg_descriptor<bool> arg_version = {"version", "Output version information"};
-  const arg_descriptor<std::string> arg_data_dir = {"data-dir", "Specify data directory"};
-  const arg_descriptor<std::string> arg_testnet_data_dir = {"testnet-data-dir", "Specify testnet data directory"};
-  const arg_descriptor<bool>		arg_test_drop_download  		= {"test-drop-download", "For net tests: in download, discard ALL blocks instead checking/saving them (very fast)"};
-  const arg_descriptor<uint64_t>	arg_test_drop_download_height  	= {"test-drop-download-height", "Like test-drop-download but disards only after around certain height", 0};
-  const arg_descriptor<int> 		arg_test_dbg_lock_sleep = {"test-dbg-lock-sleep", "Sleep time in ms, defaults to 0 (off), used to debug before/after locking mutex. Values 100 to 1000 are good for tests."};
-  const arg_descriptor<bool, false> arg_testnet_on  = {
-    "testnet"
-  , "Run on testnet. The wallet must be launched with --testnet flag."
-  , false
-  };
-  const arg_descriptor<bool> arg_dns_checkpoints  = {
-    "enforce-dns-checkpointing"
-  , "checkpoints from DNS server will be enforced"
-  , false
-  };
-  const command_line::arg_descriptor<std::string> arg_db_type = {
-    "db-type"
-  , "Specify database type"
-  , DEFAULT_DB_TYPE
-  };
-  const command_line::arg_descriptor<std::string> arg_db_sync_mode = {
-    "db-sync-mode"
-  , "Specify sync option, using format [safe|fast|fastest]:[sync|async]:[nblocks_per_sync]." 
-  , "fastest:async:1000"
-  };
-  const command_line::arg_descriptor<uint64_t> arg_fast_block_sync = {
-    "fast-block-sync"
-  , "Sync up most of the way by using embedded, known block hashes."
-  , 1
-  };
-  const command_line::arg_descriptor<uint64_t> arg_prep_blocks_threads = {
-    "prep-blocks-threads"
-  , "Max number of threads to use when preparing block hashes in groups."
-  , 4
-  };
-  const command_line::arg_descriptor<uint64_t> arg_db_auto_remove_logs  = {
-    "db-auto-remove-logs"
-  , "For BerkeleyDB only. Remove transactions logs automatically."
-  , 1
-  };
-  const command_line::arg_descriptor<uint64_t> arg_show_time_stats  = {
-    "show-time-stats"
-  , "Show time-stats when processing blocks/txs and disk synchronization."
-  , 0
-  };
-  const command_line::arg_descriptor<bool> arg_fakechain  = {
-    "fakechain"
-  , "Use a fake chain for testing purposes."
-  , false
-  };
 }

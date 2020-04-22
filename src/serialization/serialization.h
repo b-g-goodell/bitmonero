@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -29,10 +29,10 @@
 // Parts of this file are originally copyright (c) 2012-2013 The Cryptonote developers
 
 /*! \file serialization.h 
- *  \breif Simple DSL AAPI based on 
+ *  \brief Simple DSL AAPI based on
  *
  * \detailed is_blob_type and  has_free_serializer are
- * both descriptors for dispatching on to the serailize function.
+ * both descriptors for dispatching on to the serialize function.
  *
  * The API itself defines a domain specific language via dirty macro
  * hacks. Greenspun's tenth rule is very much in action throughout
@@ -41,6 +41,10 @@
 
 #pragma once
 #include <vector>
+#include <deque>
+#include <list>
+#include <set>
+#include <unordered_set>
 #include <string>
 #include <boost/type_traits/is_integral.hpp>
 #include <boost/type_traits/integral_constant.hpp>
@@ -59,6 +63,18 @@ struct is_blob_type { typedef boost::false_type type; };
 template <class T>
 struct has_free_serializer { typedef boost::true_type type; };
 
+/*! \struct is_basic_type
+ *
+ * \brief a descriptor for dispatching serialize
+ */
+template <class T>
+struct is_basic_type { typedef boost::false_type type; };
+
+template<typename F, typename S>
+struct is_basic_type<std::pair<F,S>> { typedef boost::true_type type; };
+template<>
+struct is_basic_type<std::string> { typedef boost::true_type type; };
+
 /*! \struct serializer
  *
  * \brief ... wouldn't a class be better?
@@ -75,19 +91,25 @@ struct has_free_serializer { typedef boost::true_type type; };
 template <class Archive, class T>
 struct serializer{
   static bool serialize(Archive &ar, T &v) {
-    return serialize(ar, v, typename boost::is_integral<T>::type(), typename is_blob_type<T>::type());
+    return serialize(ar, v, typename boost::is_integral<T>::type(), typename is_blob_type<T>::type(), typename is_basic_type<T>::type());
   }
-  static bool serialize(Archive &ar, T &v, boost::false_type, boost::true_type) {
+  template<typename A>
+  static bool serialize(Archive &ar, T &v, boost::false_type, boost::true_type, A a) {
     ar.serialize_blob(&v, sizeof(v));
     return true;
   }
-  static bool serialize(Archive &ar, T &v, boost::true_type, boost::false_type) {
+  template<typename A>
+  static bool serialize(Archive &ar, T &v, boost::true_type, boost::false_type, A a) {
     ar.serialize_int(v);
     return true;
   }
-  static bool serialize(Archive &ar, T &v, boost::false_type, boost::false_type) {
+  static bool serialize(Archive &ar, T &v, boost::false_type, boost::false_type, boost::false_type) {
     //serialize_custom(ar, v, typename has_free_serializer<T>::type());
     return v.do_serialize(ar);
+  }
+  static bool serialize(Archive &ar, T &v, boost::false_type, boost::false_type, boost::true_type) {
+    //serialize_custom(ar, v, typename has_free_serializer<T>::type());
+    return do_serialize(ar, v);
   }
   static void serialize_custom(Archive &ar, T &v, boost::true_type) {
   }
@@ -101,6 +123,12 @@ template <class Archive, class T>
 inline bool do_serialize(Archive &ar, T &v)
 {
   return ::serializer<Archive, T>::serialize(ar, v);
+}
+template <class Archive>
+inline bool do_serialize(Archive &ar, bool &v)
+{
+  ar.serialize_blob(&v, sizeof(v));
+  return true;
 }
 
 // Never used in the code base
@@ -170,10 +198,15 @@ inline bool do_serialize(Archive &ar, T &v)
   template <bool W, template <bool> class Archive>			\
   bool do_serialize_object(Archive<W> &ar){
 
-/*! \macro PREPARE_CUSTON_VECTOR_SERIALIZATION
+/*! \macro PREPARE_CUSTOM_VECTOR_SERIALIZATION
  */
 #define PREPARE_CUSTOM_VECTOR_SERIALIZATION(size, vec)			\
   ::serialization::detail::prepare_custom_vector_serialization(size, vec, typename Archive<W>::is_saving())
+
+/*! \macro PREPARE_CUSTOM_DEQUE_SERIALIZATION
+ */
+#define PREPARE_CUSTOM_DEQUE_SERIALIZATION(size, vec)			\
+  ::serialization::detail::prepare_custom_deque_serialization(size, vec, typename Archive<W>::is_saving())
 
 /*! \macro END_SERIALIZE
  * \brief self-explanatory
@@ -224,7 +257,7 @@ inline bool do_serialize(Archive &ar, T &v)
     if (!r || !ar.stream().good()) return false;			\
   } while(0);
 
-/*! \macro VARING_FIELD(f)
+/*! \macro VARINT_FIELD(f)
  *  \brief tags and serializes the varint \a f
  */
 #define VARINT_FIELD(f)				\
@@ -234,7 +267,7 @@ inline bool do_serialize(Archive &ar, T &v)
     if (!ar.stream().good()) return false;	\
   } while(0);
 
-/*! \macro VARING_FIELD_N(t, f)
+/*! \macro VARINT_FIELD_N(t, f)
  *
  * \brief tags (as \a t) and serializes the varint \a f
  */
@@ -265,6 +298,17 @@ namespace serialization {
 
     template <typename T>
     void prepare_custom_vector_serialization(size_t size, std::vector<T>& vec, const boost::mpl::bool_<false>& /*is_saving*/)
+    {
+      vec.resize(size);
+    }
+
+    template <typename T>
+    void prepare_custom_deque_serialization(size_t size, std::deque<T>& vec, const boost::mpl::bool_<true>& /*is_saving*/)
+    {
+    }
+
+    template <typename T>
+    void prepare_custom_deque_serialization(size_t size, std::deque<T>& vec, const boost::mpl::bool_<false>& /*is_saving*/)
     {
       vec.resize(size);
     }
@@ -319,6 +363,3 @@ namespace serialization {
     return r && check_stream_state(ar);
   }
 }
-
-#include "string.h"
-#include "vector.h"

@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -31,8 +31,9 @@
 #include <algorithm>
 #include "gtest/gtest.h"
 
-#include "blockchain_db/lmdb/db_lmdb.h"
-#include "cryptonote_core/hardfork.h"
+#include "blockchain_db/blockchain_db.h"
+#include "cryptonote_basic/cryptonote_format_utils.h"
+#include "cryptonote_basic/hardfork.h"
 
 using namespace cryptonote;
 
@@ -42,22 +43,27 @@ using namespace cryptonote;
 
 class TestDB: public BlockchainDB {
 public:
-  virtual void open(const std::string& filename, const int db_flags = 0) {
-    for (size_t n = 0; n < 256; ++n)
-      starting_height[n] = std::numeric_limits<uint64_t>::max();
-  }
+  TestDB() {};
+  virtual void open(const std::string& filename, const int db_flags = 0) { }
   virtual void close() {}
   virtual void sync() {}
+  virtual void safesyncmode(const bool onoff) {}
   virtual void reset() {}
   virtual std::vector<std::string> get_filenames() const { return std::vector<std::string>(); }
   virtual std::string get_db_name() const { return std::string(); }
   virtual bool lock() { return true; }
   virtual void unlock() { }
-  virtual void batch_start(uint64_t batch_num_blocks=0) {}
+  virtual bool batch_start(uint64_t batch_num_blocks=0, uint64_t batch_bytes=0) { return true; }
   virtual void batch_stop() {}
   virtual void set_batch_transactions(bool) {}
-  virtual bool block_exists(const crypto::hash& h) const { return false; }
-  virtual block get_block(const crypto::hash& h) const { return block(); }
+  virtual void block_txn_start(bool readonly=false) {}
+  virtual void block_txn_stop() {}
+  virtual void block_txn_abort() {}
+  virtual void drop_hard_fork_info() {}
+  virtual bool block_exists(const crypto::hash& h, uint64_t *height) const { return false; }
+  virtual blobdata get_block_blob_from_height(const uint64_t& height) const { return cryptonote::t_serializable_object_to_blob(get_block_from_height(height)); }
+  virtual blobdata get_block_blob(const crypto::hash& h) const { return blobdata(); }
+  virtual bool get_tx_blob(const crypto::hash& h, cryptonote::blobdata &tx) const { return false; }
   virtual uint64_t get_block_height(const crypto::hash& h) const { return 0; }
   virtual block_header get_block_header(const crypto::hash& h) const { return block_header(); }
   virtual uint64_t get_block_timestamp(const uint64_t& height) const { return 0; }
@@ -73,8 +79,10 @@ public:
   virtual block get_top_block() const { return block(); }
   virtual uint64_t height() const { return blocks.size(); }
   virtual bool tx_exists(const crypto::hash& h) const { return false; }
+  virtual bool tx_exists(const crypto::hash& h, uint64_t& tx_index) const { return false; }
   virtual uint64_t get_tx_unlock_time(const crypto::hash& h) const { return 0; }
   virtual transaction get_tx(const crypto::hash& h) const { return transaction(); }
+  virtual bool get_tx(const crypto::hash& h, transaction &tx) const { return false; }
   virtual uint64_t get_tx_count() const { return 0; }
   virtual std::vector<transaction> get_tx_list(const std::vector<crypto::hash>& hlist) const { return std::vector<transaction>(); }
   virtual uint64_t get_tx_block_height(const crypto::hash& h) const { return 0; }
@@ -83,25 +91,38 @@ public:
   virtual output_data_t get_output_key(const uint64_t& amount, const uint64_t& index) { return output_data_t(); }
   virtual output_data_t get_output_key(const uint64_t& global_index) const { return output_data_t(); }
   virtual tx_out_index get_output_tx_and_index_from_global(const uint64_t& index) const { return tx_out_index(); }
-  virtual tx_out_index get_output_tx_and_index(const uint64_t& amount, const uint64_t& index) { return tx_out_index(); }
-  virtual void get_output_tx_and_index(const uint64_t& amount, const std::vector<uint64_t> &offsets, std::vector<tx_out_index> &indices) {}
-  virtual void get_output_key(const uint64_t &amount, const std::vector<uint64_t> &offsets, std::vector<output_data_t> &outputs) {}
+  virtual tx_out_index get_output_tx_and_index(const uint64_t& amount, const uint64_t& index) const { return tx_out_index(); }
+  virtual void get_output_tx_and_index(const uint64_t& amount, const std::vector<uint64_t> &offsets, std::vector<tx_out_index> &indices) const {}
+  virtual void get_output_key(const uint64_t &amount, const std::vector<uint64_t> &offsets, std::vector<output_data_t> &outputs, bool allow_partial = false) {}
   virtual bool can_thread_bulk_indices() const { return false; }
   virtual std::vector<uint64_t> get_tx_output_indices(const crypto::hash& h) const { return std::vector<uint64_t>(); }
-  virtual std::vector<uint64_t> get_tx_amount_output_indices(const crypto::hash& h) const { return std::vector<uint64_t>(); }
+  virtual std::vector<uint64_t> get_tx_amount_output_indices(const uint64_t tx_index) const { return std::vector<uint64_t>(); }
   virtual bool has_key_image(const crypto::key_image& img) const { return false; }
   virtual void remove_block() { blocks.pop_back(); }
-  virtual void add_transaction_data(const crypto::hash& blk_hash, const transaction& tx, const crypto::hash& tx_hash) {}
+  virtual uint64_t add_transaction_data(const crypto::hash& blk_hash, const transaction& tx, const crypto::hash& tx_hash) {return 0;}
   virtual void remove_transaction_data(const crypto::hash& tx_hash, const transaction& tx) {}
-  virtual void add_output(const crypto::hash& tx_hash, const tx_out& tx_output, const uint64_t& local_index, const uint64_t unlock_time) {}
-  virtual void remove_output(const tx_out& tx_output) {}
+  virtual uint64_t add_output(const crypto::hash& tx_hash, const tx_out& tx_output, const uint64_t& local_index, const uint64_t unlock_time, const rct::key *commitment) {return 0;}
+  virtual void add_tx_amount_output_indices(const uint64_t tx_index, const std::vector<uint64_t>& amount_output_indices) {}
   virtual void add_spent_key(const crypto::key_image& k_image) {}
   virtual void remove_spent_key(const crypto::key_image& k_image) {}
 
   virtual bool for_all_key_images(std::function<bool(const crypto::key_image&)>) const { return true; }
-  virtual bool for_all_blocks(std::function<bool(uint64_t, const crypto::hash&, const cryptonote::block&)>) const { return true; }
+  virtual bool for_blocks_range(const uint64_t&, const uint64_t&, std::function<bool(uint64_t, const crypto::hash&, const cryptonote::block&)>) const { return true; }
   virtual bool for_all_transactions(std::function<bool(const crypto::hash&, const cryptonote::transaction&)>) const { return true; }
-  virtual bool for_all_outputs(std::function<bool(uint64_t amount, const crypto::hash &tx_hash, size_t tx_idx)> f) const { return true; }
+  virtual bool for_all_outputs(std::function<bool(uint64_t amount, const crypto::hash &tx_hash, uint64_t height, size_t tx_idx)> f) const { return true; }
+  virtual bool for_all_outputs(uint64_t amount, const std::function<bool(uint64_t height)> &f) const { return true; }
+  virtual bool is_read_only() const { return false; }
+  virtual std::map<uint64_t, std::tuple<uint64_t, uint64_t, uint64_t>> get_output_histogram(const std::vector<uint64_t> &amounts, bool unlocked, uint64_t recent_cutoff) const { return std::map<uint64_t, std::tuple<uint64_t, uint64_t, uint64_t>>(); }
+
+  virtual void add_txpool_tx(const transaction &tx, const txpool_tx_meta_t& details) {}
+  virtual void update_txpool_tx(const crypto::hash &txid, const txpool_tx_meta_t& details) {}
+  virtual uint64_t get_txpool_tx_count(bool include_unrelayed_txes = true) const { return 0; }
+  virtual bool txpool_has_tx(const crypto::hash &txid) const { return false; }
+  virtual void remove_txpool_tx(const crypto::hash& txid) {}
+  virtual bool get_txpool_tx_meta(const crypto::hash& txid, txpool_tx_meta_t &meta) const { return false; }
+  virtual bool get_txpool_tx_blob(const crypto::hash& txid, cryptonote::blobdata &bd) const { return false; }
+  virtual cryptonote::blobdata get_txpool_tx_blob(const crypto::hash& txid) const { return ""; }
+  virtual bool for_all_txpool_txes(std::function<bool(const crypto::hash&, const txpool_tx_meta_t&, const cryptonote::blobdata*)>, bool include_blob = false, bool include_unrelayed_txes = false) const { return false; }
 
   virtual void add_block( const block& blk
                         , const size_t& block_size
@@ -112,33 +133,67 @@ public:
     blocks.push_back(blk);
   }
   virtual block get_block_from_height(const uint64_t& height) const {
-    return blocks[height];
-  }
-  virtual void set_hard_fork_starting_height(uint8_t version, uint64_t height) {
-    starting_height[version] = height;
-  }
-  virtual uint64_t get_hard_fork_starting_height(uint8_t version) const {
-    return starting_height[version];
+    return blocks.at(height);
   }
   virtual void set_hard_fork_version(uint64_t height, uint8_t version) {
-    if (versions.size() <= height) versions.resize(height+1); versions[height] = version;
+    if (versions.size() <= height) 
+      versions.resize(height+1); 
+    versions[height] = version;
   }
   virtual uint8_t get_hard_fork_version(uint64_t height) const {
-    return versions[height];
+    return versions.at(height);
   }
+  virtual void check_hard_fork_info() {}
 
 private:
   std::vector<block> blocks;
-  uint64_t starting_height[256];
   std::deque<uint8_t> versions;
 };
 
-static cryptonote::block mkblock(uint8_t version)
+static cryptonote::block mkblock(uint8_t version, uint8_t vote)
 {
   cryptonote::block b;
   b.major_version = version;
-  b.minor_version = version;
+  b.minor_version = vote;
   return b;
+}
+
+static cryptonote::block mkblock(const HardFork &hf, uint64_t height, uint8_t vote)
+{
+  cryptonote::block b;
+  b.major_version = hf.get(height);
+  b.minor_version = vote;
+  return b;
+}
+
+TEST(major, Only)
+{
+  TestDB db;
+  HardFork hf(db, 1, 0, 0, 0, 1, 0); // no voting
+
+  //                      v  h  t
+  ASSERT_TRUE(hf.add_fork(1, 0, 0));
+  ASSERT_TRUE(hf.add_fork(2, 2, 1));
+  hf.init();
+
+  // block height 0, only version 1 is accepted
+  ASSERT_FALSE(hf.add(mkblock(0, 2), 0));
+  ASSERT_FALSE(hf.add(mkblock(2, 2), 0));
+  ASSERT_TRUE(hf.add(mkblock(1, 2), 0));
+  db.add_block(mkblock(1, 1), 0, 0, 0, crypto::hash());
+
+  // block height 1, only version 1 is accepted
+  ASSERT_FALSE(hf.add(mkblock(0, 2), 1));
+  ASSERT_FALSE(hf.add(mkblock(2, 2), 1));
+  ASSERT_TRUE(hf.add(mkblock(1, 2), 1));
+  db.add_block(mkblock(1, 1), 0, 0, 0, crypto::hash());
+
+  // block height 2, only version 2 is accepted
+  ASSERT_FALSE(hf.add(mkblock(0, 2), 2));
+  ASSERT_FALSE(hf.add(mkblock(1, 2), 2));
+  ASSERT_FALSE(hf.add(mkblock(3, 2), 2));
+  ASSERT_TRUE(hf.add(mkblock(2, 2), 2));
+  db.add_block(mkblock(2, 1), 0, 0, 0, crypto::hash());
 }
 
 TEST(empty_hardforks, Success)
@@ -152,7 +207,7 @@ TEST(empty_hardforks, Success)
   ASSERT_TRUE(hf.get_state(time(NULL) + 3600*24*400) == HardFork::Ready);
 
   for (uint64_t h = 0; h <= 10; ++h) {
-    db.add_block(mkblock(1), 0, 0, 0, crypto::hash());
+    db.add_block(mkblock(hf, h, 1), 0, 0, 0, crypto::hash());
     ASSERT_TRUE(hf.add(db.get_block_from_height(h), h));
   }
   ASSERT_EQ(hf.get(0), 1);
@@ -210,7 +265,7 @@ TEST(steps_asap, Success)
   hf.init();
 
   for (uint64_t h = 0; h < 10; ++h) {
-    db.add_block(mkblock(9), 0, 0, 0, crypto::hash());
+    db.add_block(mkblock(hf, h, 9), 0, 0, 0, crypto::hash());
     ASSERT_TRUE(hf.add(db.get_block_from_height(h), h));
   }
 
@@ -237,7 +292,7 @@ TEST(steps_1, Success)
   hf.init();
 
   for (uint64_t h = 0 ; h < 10; ++h) {
-    db.add_block(mkblock(h+1), 0, 0, 0, crypto::hash());
+    db.add_block(mkblock(hf, h, h+1), 0, 0, 0, crypto::hash());
     ASSERT_TRUE(hf.add(db.get_block_from_height(h), h));
   }
 
@@ -262,7 +317,7 @@ TEST(reorganize, Same)
     //                                 index  0  1  2  3  4  5  6  7  8  9
     static const uint8_t block_versions[] = { 1, 1, 4, 4, 7, 7, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9 };
     for (uint64_t h = 0; h < 20; ++h) {
-      db.add_block(mkblock(block_versions[h]), 0, 0, 0, crypto::hash());
+      db.add_block(mkblock(hf, h, block_versions[h]), 0, 0, 0, crypto::hash());
       ASSERT_TRUE(hf.add(db.get_block_from_height(h), h));
     }
 
@@ -272,17 +327,12 @@ TEST(reorganize, Same)
         uint8_t version = hh >= history ? block_versions[hh - history] : 1;
         ASSERT_EQ(hf.get(hh), version);
       }
-      ASSERT_EQ(hf.get_start_height(1), 0);
-      ASSERT_EQ(hf.get_start_height(4), 2 + history);
-      ASSERT_EQ(hf.get_start_height(7), 4 + history);
-      ASSERT_EQ(hf.get_start_height(9), 6 + history);
     }
   }
 }
 
 TEST(reorganize, Changed)
 {
-  int history = 4;
   TestDB db;
   HardFork hf(db, 1, 0, 1, 1, 4, 100);
 
@@ -298,7 +348,7 @@ TEST(reorganize, Changed)
   static const uint8_t block_versions[] =    { 1, 1, 4, 4, 7, 7, 9, 9, 9, 9, 9, 9, 9, 9, 9, 9 };
   static const uint8_t expected_versions[] = { 1, 1, 1, 1, 1, 1, 4, 4, 7, 7, 9, 9, 9, 9, 9, 9 };
   for (uint64_t h = 0; h < 16; ++h) {
-    db.add_block(mkblock(block_versions[h]), 0, 0, 0, crypto::hash());
+    db.add_block(mkblock(hf, h, block_versions[h]), 0, 0, 0, crypto::hash());
     ASSERT_TRUE (hf.add(db.get_block_from_height(h), h));
   }
 
@@ -307,10 +357,6 @@ TEST(reorganize, Changed)
     for (int hh = 0; hh < 16; ++hh) {
       ASSERT_EQ(hf.get(hh), expected_versions[hh]);
     }
-    ASSERT_EQ(hf.get_start_height(1), 0);
-    ASSERT_EQ(hf.get_start_height(4), 6);
-    ASSERT_EQ(hf.get_start_height(7), 8);
-    ASSERT_EQ(hf.get_start_height(9), 10);
   }
 
   // delay a bit for 9, and go back to 1 to check it stays at 9
@@ -322,7 +368,7 @@ TEST(reorganize, Changed)
   ASSERT_EQ(db.height(), 3);
   hf.reorganize_from_block_height(2);
   for (uint64_t h = 3; h < 16; ++h) {
-    db.add_block(mkblock(block_versions_new[h]), 0, 0, 0, crypto::hash());
+    db.add_block(mkblock(hf, h, block_versions_new[h]), 0, 0, 0, crypto::hash());
     bool ret = hf.add(db.get_block_from_height(h), h);
     ASSERT_EQ (ret, h < 15);
   }
@@ -331,10 +377,6 @@ TEST(reorganize, Changed)
   for (int hh = 0; hh < 15; ++hh) {
     ASSERT_EQ(hf.get(hh), expected_versions_new[hh]);
   }
-  ASSERT_EQ(hf.get_start_height(1), 0);
-  ASSERT_EQ(hf.get_start_height(4), 6);
-  ASSERT_EQ(hf.get_start_height(7), 11);
-  ASSERT_EQ(hf.get_start_height(9), 14);
 }
 
 TEST(voting, threshold)
@@ -350,7 +392,7 @@ TEST(voting, threshold)
 
     for (uint64_t h = 0; h <= 8; ++h) {
       uint8_t v = 1 + !!(h % 8);
-      db.add_block(mkblock(v), 0, 0, 0, crypto::hash());
+      db.add_block(mkblock(hf, h, v), 0, 0, 0, crypto::hash());
       bool ret = hf.add(db.get_block_from_height(h), h);
       if (h >= 8 && threshold == 87) {
         // for threshold 87, we reach the treshold at height 7, so from height 8, hard fork to version 2, but 8 tries to add 1
@@ -384,7 +426,7 @@ TEST(voting, different_thresholds)
     static const uint8_t expected_versions[] = { 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4 };
 
     for (uint64_t h = 0; h < sizeof(block_versions) / sizeof(block_versions[0]); ++h) {
-      db.add_block(mkblock(block_versions[h]), 0, 0, 0, crypto::hash());
+      db.add_block(mkblock(hf, h, block_versions[h]), 0, 0, 0, crypto::hash());
       bool ret = hf.add(db.get_block_from_height(h), h);
       ASSERT_EQ(ret, true);
     }
@@ -404,19 +446,17 @@ TEST(new_blocks, denied)
     ASSERT_TRUE(hf.add_fork(2, 2, 1));
     hf.init();
 
-    ASSERT_TRUE(hf.add(mkblock(1), 0));
-    ASSERT_TRUE(hf.add(mkblock(1), 1));
-    ASSERT_TRUE(hf.add(mkblock(1), 2));
-    ASSERT_TRUE(hf.add(mkblock(2), 3));
-    ASSERT_TRUE(hf.add(mkblock(1), 4));
-    ASSERT_TRUE(hf.add(mkblock(1), 5));
-    ASSERT_TRUE(hf.add(mkblock(1), 6));
-    ASSERT_TRUE(hf.add(mkblock(2), 7));
-    ASSERT_TRUE(hf.add(mkblock(2), 8)); // we reach 50% of the last 4
-    ASSERT_FALSE(hf.add(mkblock(1), 9)); // so this one can't get added
-    ASSERT_TRUE(hf.add(mkblock(2), 10));
-
-    ASSERT_EQ(hf.get_start_height(2), 9);
+    ASSERT_TRUE(hf.add(mkblock(1, 1), 0));
+    ASSERT_TRUE(hf.add(mkblock(1, 1), 1));
+    ASSERT_TRUE(hf.add(mkblock(1, 1), 2));
+    ASSERT_TRUE(hf.add(mkblock(1, 2), 3));
+    ASSERT_TRUE(hf.add(mkblock(1, 1), 4));
+    ASSERT_TRUE(hf.add(mkblock(1, 1), 5));
+    ASSERT_TRUE(hf.add(mkblock(1, 1), 6));
+    ASSERT_TRUE(hf.add(mkblock(1, 2), 7));
+    ASSERT_TRUE(hf.add(mkblock(1, 2), 8)); // we reach 50% of the last 4
+    ASSERT_FALSE(hf.add(mkblock(2, 1), 9)); // so this one can't get added
+    ASSERT_TRUE(hf.add(mkblock(2, 2), 9));
 }
 
 TEST(new_version, early)
@@ -429,16 +469,14 @@ TEST(new_version, early)
     ASSERT_TRUE(hf.add_fork(2, 4, 1));
     hf.init();
 
-    ASSERT_TRUE(hf.add(mkblock(2), 0));
-    ASSERT_TRUE(hf.add(mkblock(2), 1)); // we have enough votes already
-    ASSERT_TRUE(hf.add(mkblock(2), 2));
-    ASSERT_TRUE(hf.add(mkblock(1), 3)); // we accept a previous version because we did not switch, even with all the votes
-    ASSERT_TRUE(hf.add(mkblock(2), 4)); // but have to wait for the declared height anyway
-    ASSERT_TRUE(hf.add(mkblock(2), 5));
-    ASSERT_FALSE(hf.add(mkblock(1), 6)); // we don't accept 1 anymore
-    ASSERT_TRUE(hf.add(mkblock(2), 7)); // but we do accept 2
-
-    ASSERT_EQ(hf.get_start_height(2), 4);
+    ASSERT_TRUE(hf.add(mkblock(1, 2), 0));
+    ASSERT_TRUE(hf.add(mkblock(1, 2), 1)); // we have enough votes already
+    ASSERT_TRUE(hf.add(mkblock(1, 2), 2));
+    ASSERT_TRUE(hf.add(mkblock(1, 1), 3)); // we accept a previous version because we did not switch, even with all the votes
+    ASSERT_TRUE(hf.add(mkblock(2, 2), 4)); // but have to wait for the declared height anyway
+    ASSERT_TRUE(hf.add(mkblock(2, 2), 5));
+    ASSERT_FALSE(hf.add(mkblock(2, 1), 6)); // we don't accept 1 anymore
+    ASSERT_TRUE(hf.add(mkblock(2, 2), 7)); // but we do accept 2
 }
 
 TEST(reorganize, changed)
@@ -455,7 +493,7 @@ TEST(reorganize, changed)
 
 #define ADD(v, h, a) \
   do { \
-    cryptonote::block b = mkblock(v); \
+    cryptonote::block b = mkblock(hf, h, v); \
     db.add_block(b, 0, 0, 0, crypto::hash()); \
     ASSERT_##a(hf.add(b, h)); \
   } while(0)
@@ -473,8 +511,6 @@ TEST(reorganize, changed)
     ADD_TRUE(3, 7);
     ADD_TRUE(4, 8);
     ADD_TRUE(4, 9);
-    ASSERT_EQ(hf.get_start_height(2), 4); // reaches threshold 2 at height 3, so height 4 forks
-    ASSERT_EQ(hf.get_start_height(3), 9);
     ASSERT_EQ(hf.get_current_version(), 3);
 
     // pop a few blocks and check current version goes back down
@@ -491,9 +527,7 @@ TEST(reorganize, changed)
     ADD_TRUE(2, 7);
     ADD_TRUE(2, 8);
     ADD_TRUE(2, 9);
-    ASSERT_EQ(hf.get_start_height(2), 4); // unchanged
     ASSERT_EQ(hf.get_current_version(), 2); // we did not bump to 3 this time
-    ASSERT_EQ(hf.get_start_height(3), std::numeric_limits<uint64_t>::max()); // not yet
 }
 
 TEST(get, higher)

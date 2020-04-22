@@ -30,10 +30,15 @@
 #ifndef _HTTP_SERVER_H_
 #define _HTTP_SERVER_H_
 
+#include <boost/optional/optional.hpp>
 #include <string>
 #include "net_utils_base.h"
 #include "to_nonconst_iterator.h"
+#include "http_auth.h"
 #include "http_base.h"
+
+#undef MONERO_DEFAULT_LOG_CATEGORY
+#define MONERO_DEFAULT_LOG_CATEGORY "net.http"
 
 namespace epee
 {
@@ -49,6 +54,8 @@ namespace net_utils
 		struct http_server_config
 		{
 			std::string m_folder;
+			std::vector<std::string> m_access_control_origins;
+			boost::optional<login> m_user;
 			critical_section m_lock;
 		};
 
@@ -153,6 +160,7 @@ namespace net_utils
 		struct custum_handler_config: public http_server_config
 		{
 			i_http_server_handler<t_connection_context>* m_phandler;
+			std::function<void(size_t, uint8_t*)> rng;
 		};
 
 		/************************************************************************/
@@ -168,16 +176,26 @@ namespace net_utils
 			http_custom_handler(i_service_endpoint* psnd_hndlr, config_type& config, t_connection_context& conn_context)
 				: simple_http_connection_handler<t_connection_context>(psnd_hndlr, config),
 					m_config(config),
-					m_conn_context(conn_context)
+					m_conn_context(conn_context),
+					m_auth(m_config.m_user ? http_server_auth{*m_config.m_user, config.rng} : http_server_auth{})
 			{}
 			inline bool handle_request(const http_request_info& query_info, http_response_info& response)
 			{
 				CHECK_AND_ASSERT_MES(m_config.m_phandler, false, "m_config.m_phandler is NULL!!!!");
+
+				const auto auth_response = m_auth.get_response(query_info);
+				if (auth_response)
+				{
+					response = std::move(*auth_response);
+					return true;
+				}
+
 				//fill with default values
 				response.m_mime_tipe = "text/plain";
 				response.m_response_code = 200;
 				response.m_response_comment = "OK";
 				response.m_body.clear();
+
 				return m_config.m_phandler->handle_http_request(query_info, response, m_conn_context);
 			}
 
@@ -201,6 +219,7 @@ namespace net_utils
 			//simple_http_connection_handler::config_type m_stub_config;
 			config_type& m_config;
 			t_connection_context& m_conn_context;
+			http_server_auth m_auth;
 		};
 	}
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -44,21 +44,16 @@ namespace
   const command_line::arg_descriptor<bool>        arg_test_transactions           = {"test_transactions", ""};
 }
 
-unsigned int epee::g_test_dbg_lock_sleep = 0;
-
 int main(int argc, char* argv[])
 {
   TRY_ENTRY();
+  tools::on_startup();
   epee::string_tools::set_module_name_and_folder(argv[0]);
 
   //set up logging options
-  epee::log_space::get_set_log_detalisation_level(true, LOG_LEVEL_3);
-  epee::log_space::log_singletone::add_logger(LOGGER_CONSOLE, NULL, NULL, LOG_LEVEL_2);
+  mlog_configure(mlog_get_default_log_path("core_tests.log"), true);
+  mlog_set_log_level(2);
   
-  epee::log_space::log_singletone::add_logger(LOGGER_FILE, 
-    epee::log_space::log_singletone::get_default_log_file().c_str(), 
-    epee::log_space::log_singletone::get_default_log_folder().c_str());
-
   po::options_description desc_options("Allowed options");
   command_line::add_arg(desc_options, command_line::arg_help);
   command_line::add_arg(desc_options, arg_test_data_path);
@@ -168,19 +163,73 @@ int main(int argc, char* argv[])
 
     GENERATE_AND_PLAY(gen_block_reward);
 
-    std::cout << (failed_tests.empty() ? concolor::green : concolor::magenta);
-    std::cout << "\nREPORT:\n";
-    std::cout << "  Test run: " << tests_count << '\n';
-    std::cout << "  Failures: " << failed_tests.size() << '\n';
+    GENERATE_AND_PLAY(gen_v2_tx_mixable_0_mixin);
+    GENERATE_AND_PLAY(gen_v2_tx_mixable_low_mixin);
+//    GENERATE_AND_PLAY(gen_v2_tx_unmixable_only);
+//    GENERATE_AND_PLAY(gen_v2_tx_unmixable_one);
+//    GENERATE_AND_PLAY(gen_v2_tx_unmixable_two);
+    GENERATE_AND_PLAY(gen_v2_tx_dust);
+
+    GENERATE_AND_PLAY(gen_rct_tx_valid_from_pre_rct);
+    GENERATE_AND_PLAY(gen_rct_tx_valid_from_rct);
+    GENERATE_AND_PLAY(gen_rct_tx_valid_from_mixed);
+    GENERATE_AND_PLAY(gen_rct_tx_pre_rct_bad_real_dest);
+    GENERATE_AND_PLAY(gen_rct_tx_pre_rct_bad_real_mask);
+    GENERATE_AND_PLAY(gen_rct_tx_pre_rct_bad_fake_dest);
+    GENERATE_AND_PLAY(gen_rct_tx_pre_rct_bad_fake_mask);
+    GENERATE_AND_PLAY(gen_rct_tx_rct_bad_real_dest);
+    GENERATE_AND_PLAY(gen_rct_tx_rct_bad_real_mask);
+    GENERATE_AND_PLAY(gen_rct_tx_rct_bad_fake_dest);
+    GENERATE_AND_PLAY(gen_rct_tx_rct_bad_fake_mask);
+    GENERATE_AND_PLAY(gen_rct_tx_rct_spend_with_zero_commit);
+    GENERATE_AND_PLAY(gen_rct_tx_pre_rct_zero_vin_amount);
+    GENERATE_AND_PLAY(gen_rct_tx_rct_non_zero_vin_amount);
+    GENERATE_AND_PLAY(gen_rct_tx_non_zero_vout_amount);
+    GENERATE_AND_PLAY(gen_rct_tx_pre_rct_duplicate_key_image);
+    GENERATE_AND_PLAY(gen_rct_tx_rct_duplicate_key_image);
+    GENERATE_AND_PLAY(gen_rct_tx_pre_rct_wrong_key_image);
+    GENERATE_AND_PLAY(gen_rct_tx_rct_wrong_key_image);
+    GENERATE_AND_PLAY(gen_rct_tx_pre_rct_wrong_fee);
+    GENERATE_AND_PLAY(gen_rct_tx_rct_wrong_fee);
+    GENERATE_AND_PLAY(gen_rct_tx_pre_rct_remove_vin);
+    GENERATE_AND_PLAY(gen_rct_tx_rct_remove_vin);
+    GENERATE_AND_PLAY(gen_rct_tx_pre_rct_add_vout);
+    GENERATE_AND_PLAY(gen_rct_tx_rct_add_vout);
+    GENERATE_AND_PLAY(gen_rct_tx_pre_rct_increase_vin_and_fee);
+    GENERATE_AND_PLAY(gen_rct_tx_pre_rct_altered_extra);
+    GENERATE_AND_PLAY(gen_rct_tx_rct_altered_extra);
+
+    GENERATE_AND_PLAY(gen_multisig_tx_valid_22_1_2);
+    GENERATE_AND_PLAY(gen_multisig_tx_valid_22_1_2_many_inputs);
+    GENERATE_AND_PLAY(gen_multisig_tx_valid_22_2_1);
+    GENERATE_AND_PLAY(gen_multisig_tx_valid_33_1_23);
+    GENERATE_AND_PLAY(gen_multisig_tx_valid_33_3_21);
+    GENERATE_AND_PLAY(gen_multisig_tx_valid_23_1_2);
+    GENERATE_AND_PLAY(gen_multisig_tx_valid_23_1_3);
+    GENERATE_AND_PLAY(gen_multisig_tx_valid_23_2_1);
+    GENERATE_AND_PLAY(gen_multisig_tx_valid_23_2_3);
+    GENERATE_AND_PLAY(gen_multisig_tx_valid_45_1_234);
+    GENERATE_AND_PLAY(gen_multisig_tx_valid_45_4_135_many_inputs);
+    GENERATE_AND_PLAY(gen_multisig_tx_valid_89_3_1245789);
+    GENERATE_AND_PLAY(gen_multisig_tx_invalid_23_1__no_threshold);
+    GENERATE_AND_PLAY(gen_multisig_tx_invalid_45_5_23_no_threshold);
+    GENERATE_AND_PLAY(gen_multisig_tx_invalid_22_1__no_threshold);
+    GENERATE_AND_PLAY(gen_multisig_tx_invalid_33_1__no_threshold);
+    GENERATE_AND_PLAY(gen_multisig_tx_invalid_33_1_2_no_threshold);
+    GENERATE_AND_PLAY(gen_multisig_tx_invalid_33_1_3_no_threshold);
+
+    el::Level level = (failed_tests.empty() ? el::Level::Info : el::Level::Error);
+    MLOG(level, "\nREPORT:");
+    MLOG(level, "  Test run: " << tests_count);
+    MLOG(level, "  Failures: " << failed_tests.size());
     if (!failed_tests.empty())
     {
-      std::cout << "FAILED TESTS:\n";
+      MLOG(level, "FAILED TESTS:");
       BOOST_FOREACH(auto test_name, failed_tests)
       {
-        std::cout << "  " << test_name << '\n';
+        MLOG(level, "  " << test_name);
       }
     }
-    std::cout << concolor::normal << std::endl;
   }
   else if (command_line::get_arg(vm, arg_test_transactions))
   {
@@ -188,8 +237,7 @@ int main(int argc, char* argv[])
   }
   else
   {
-    std::cout << concolor::magenta << "Wrong arguments" << concolor::normal << std::endl;
-    std::cout << desc_options << std::endl;
+    MERROR("Wrong arguments");
     return 2;
   }
 

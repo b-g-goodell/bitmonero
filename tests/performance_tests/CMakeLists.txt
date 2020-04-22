@@ -1,4 +1,4 @@
-# Copyright (c) 2014-2015, The Monero Project
+# Copyright (c) 2014-2018, The Monero Project
 #
 # All rights reserved.
 #
@@ -30,15 +30,18 @@ set(performance_tests_sources
   main.cpp)
 
 set(performance_tests_headers
-  check_ring_signature.h
+  check_tx_signature.h
   cn_slow_hash.h
   construct_tx.h
   derive_public_key.h
   derive_secret_key.h
+  ge_frombytes_vartime.h
   generate_key_derivation.h
   generate_key_image.h
   generate_key_image_helper.h
+  generate_keypair.h
   is_out_to_acc.h
+  subaddress_expand.h
   multi_tx_test_base.h
   performance_tests.h
   performance_utils.h
@@ -48,11 +51,12 @@ add_executable(performance_tests
   ${performance_tests_sources}
   ${performance_tests_headers})
 target_link_libraries(performance_tests
-  LINK_PRIVATE
+  PRIVATE
+    wallet
     cryptonote_core
     common
-    crypto
-    ${UNBOUND_LIBRARY}
+    cncrypto
+    epee
     ${Boost_CHRONO_LIBRARY}
     ${CMAKE_THREAD_LIBS_INIT}
     ${EXTRA_LIBRARIES})

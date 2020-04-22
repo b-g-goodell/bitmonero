@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -31,14 +31,14 @@
 #pragma once
 
 #include "crypto/crypto.h"
-#include "cryptonote_core/cryptonote_basic.h"
+#include "cryptonote_basic/cryptonote_basic.h"
 
 #include "single_tx_test_base.h"
 
 class test_derive_secret_key : public single_tx_test_base
 {
 public:
-  static const size_t loop_count = 1000000;
+  static const size_t loop_count = 10000;
 
   bool init()
   {

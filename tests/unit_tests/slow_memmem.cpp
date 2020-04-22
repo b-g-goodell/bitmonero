@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -35,8 +35,9 @@
 #include <stdint.h>
 #include "gtest/gtest.h"
 
-// Both OS X and FreeBSD don't need malloc.h
-#if !defined(__APPLE__) && !defined(__FreeBSD__)
+// OS X, FreeBSD, and OpenBSD don't need malloc.h
+#if !defined(__APPLE__) && !defined(__FreeBSD__) && !defined(__OpenBSD__) && \
+    !defined(__DragonFly__)
  #include <malloc.h>
 #endif
 
@@ -80,7 +81,6 @@ static const struct {
   {1,"x",1,"x",0},
   {2,"x",1,"",1},
   {1,"x",1,"",0},
-  {1,"x",2,"",0},
   {1,"x",2,"x",0},
   {2,"ax",2,"x",0},
   {1,"xx",2,"xx",0},
@@ -102,7 +102,7 @@ static const struct {
   {8,"xxxxxxab",3,"xyz",0},
   {8,"xxxxxxab",6,"abcdef",0},
   {9,"\0xxxxxab",3,"ab",6},
-  {4,"\0\0a",3,"\0a",1},
+  {4,"\0\0a",3,"\0a",1}, //
 };
 
 TEST(slowmem,Success)
@@ -121,7 +121,6 @@ TEST(slowmem,Success)
     free(pat);
     free(buf);
     ASSERT_EQ(res,T[n].res);
-ASSERT_EQ(1,1);
 #ifdef VERBOSE
     if (res!=T[n].res) printf("failed (got %zu, expected %zu)",res,T[n].res); else printf("ok");
     printf("\n");

@@ -1,4 +1,4 @@
-# Copyright (c) 2014-2015, The Monero Project
+# Copyright (c) 2014-2018, The Monero Project
 # 
 # All rights reserved.
 # 
@@ -34,14 +34,12 @@
 # We always compile if we are building statically to reduce static dependency issues...
 # ...except for FreeBSD, because FreeBSD is a special case that doesn't play well with
 # others.
-
-find_package(Miniupnpc QUIET)
-
-# FreeBSD doesn't play well with the local copy, so default to using shared
-set(USE_SHARED_MINIUPNPC false)
+if(NOT IOS)
+    find_package(Miniupnpc QUIET)
+endif()
 
 # If we have the correct shared version and we're not building static, use it
-if(STATIC)
+if(STATIC OR IOS)
  set(USE_SHARED_MINIUPNPC false)
 elseif(MINIUPNP_FOUND AND MINIUPNPC_VERSION_1_7_OR_HIGHER)
  set(USE_SHARED_MINIUPNPC true)
@@ -60,25 +58,27 @@ else()
     message(STATUS "Using miniupnpc from local source tree (/external/miniupnpc)")
   endif()
 
-  set(UPNPC_BUILD_STATIC ON CACHE BOOL "Build static library")
-  set(UPNPC_BUILD_SHARED OFF CACHE BOOL "Build shared library")
-  set(UPNPC_BUILD_TESTS OFF CACHE BOOL "Build test executables")
   add_subdirectory(miniupnpc)
 
-  set_property(TARGET upnpc-static PROPERTY FOLDER "external")
+  set_property(TARGET libminiupnpc-static PROPERTY FOLDER "external")
   if(MSVC)
-    set_property(TARGET upnpc-static APPEND_STRING PROPERTY COMPILE_FLAGS " -wd4244 -wd4267")
+    set_property(TARGET libminiupnpc-static APPEND_STRING PROPERTY COMPILE_FLAGS " -wd4244 -wd4267")
   elseif(NOT MSVC)
-    set_property(TARGET upnpc-static APPEND_STRING PROPERTY COMPILE_FLAGS " -Wno-undef -Wno-unused-result -Wno-unused-value")
+    set_property(TARGET libminiupnpc-static APPEND_STRING PROPERTY COMPILE_FLAGS " -Wno-undef -Wno-unused-result -Wno-unused-value")
   endif()
 
   set(UPNP_STATIC true PARENT_SCOPE)
-  set(UPNP_LIBRARIES "upnpc-static" PARENT_SCOPE)
+  set(UPNP_LIBRARIES "libminiupnpc-static" PARENT_SCOPE)
 endif()
 
 find_package(Unbound)
 
 if(NOT UNBOUND_INCLUDE_DIR OR STATIC)
+  # NOTE: If STATIC is true, CMAKE_FIND_LIBRARY_SUFFIXES has been reordered.
+  # unbound has config tests which used OpenSSL libraries, so -ldl may need to
+  # be set in this case.
+  # The unbound CMakeLists.txt can set it, since it's also needed for the
+  # static OpenSSL libraries set up there after with target_link_libraries.
   add_subdirectory(unbound)
 
   set(UNBOUND_STATIC true PARENT_SCOPE)
@@ -99,3 +99,4 @@ else()
 endif()
 
 add_subdirectory(db_drivers)
+add_subdirectory(easylogging++)

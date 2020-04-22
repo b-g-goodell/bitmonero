@@ -1,4 +1,4 @@
-# Copyright (c) 2014-2015, The Monero Project
+# Copyright (c) 2014-2018, The Monero Project
 # 
 # All rights reserved.
 # 
@@ -28,6 +28,10 @@
 # 
 # Parts of this file are originally copyright (c) 2012-2013 The Cryptonote developers
 
+# The docs say this only affects grouping in IDEs
+set(folder "tests")
+set(TEST_DATA_DIR "${CMAKE_CURRENT_LIST_DIR}/data")
+
 if (WIN32 AND STATIC)
   add_definitions(-DSTATICLIB)
   # miniupnp changed their static define
@@ -39,22 +43,42 @@ find_package(GTest)
 if (GTest_FOUND)
   include_directories(SYSTEM ${GTEST_INCLUDE_DIRS})
 else ()
-  add_subdirectory(gtest)
-  include_directories(SYSTEM "${gtest_SOURCE_DIR}/include" "${gtest_SOURCE_DIR}")
+  message(STATUS "GTest not found on the system: will use GTest bundled with this source")
+
+  include(ExternalProject)
+  ExternalProject_Add(googletest
+    SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/gtest
+    BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR}/gtest
+    DOWNLOAD_COMMAND ""
+    UPDATE_COMMAND ""
+    INSTALL_COMMAND ""
+  )
+  add_library(gtest      UNKNOWN IMPORTED)
+  add_library(gtest_main UNKNOWN IMPORTED)
+  set_target_properties(gtest PROPERTIES
+    IMPORTED_LOCATION "${CMAKE_CURRENT_BINARY_DIR}/gtest/${CMAKE_STATIC_LIBRARY_PREFIX}gtest${CMAKE_STATIC_LIBRARY_SUFFIX}"
+  )
+  set_target_properties(gtest_main PROPERTIES
+    IMPORTED_LOCATION "${CMAKE_CURRENT_BINARY_DIR}/gtest/${CMAKE_STATIC_LIBRARY_PREFIX}gtest_main${CMAKE_STATIC_LIBRARY_SUFFIX}"
+  )
+  add_dependencies(gtest      googletest)
+  add_dependencies(gtest_main googletest)
 
   # Emulate the FindGTest module's variable.
-  set(GTEST_MAIN_LIBRARIES gtest_main)
+  set(GTEST_LIBRARIES gtest gtest_main)
+  include_directories(SYSTEM "${CMAKE_CURRENT_SOURCE_DIR}/gtest/include")
+endif (GTest_FOUND)
 
-  # Ignore some warnings when building gtest binaries.
-  if(NOT MSVC)
-    set_property(TARGET gtest gtest_main
-      APPEND_STRING
-      PROPERTY
-        COMPILE_FLAGS " -Wno-undef -Wno-sign-compare")
-  endif()
-endif ()
+file(COPY
+  data/wallet_9svHk1.keys
+  data/wallet_9svHk1
+  data/outputs
+  data/unsigned_monero_tx
+  data/signed_monero_tx
+  DESTINATION data)
 
 add_subdirectory(core_tests)
+add_subdirectory(fuzz)
 add_subdirectory(crypto)
 add_subdirectory(functional_tests)
 add_subdirectory(performance_tests)
@@ -63,6 +87,9 @@ add_subdirectory(unit_tests)
 add_subdirectory(difficulty)
 add_subdirectory(hash)
 add_subdirectory(net_load_tests)
+if (BUILD_GUI_DEPS)
+  add_subdirectory(libwallet_api_tests)
+endif()
 
 # add_subdirectory(daemon_tests)
 
@@ -75,15 +102,24 @@ add_executable(hash-target-tests
   ${hash_targets_sources}
   ${hash_targets_headers})
 target_link_libraries(hash-target-tests
-  LINK_PRIVATE
+  PRIVATE
     cryptonote_core)
 set_property(TARGET hash-target-tests
   PROPERTY
-    FOLDER "tests")
+    FOLDER "${folder}")
 
 add_test(
   NAME    hash-target
   COMMAND hash-target-tests)
 
-add_custom_target(tests DEPENDS coretests difficulty hash performance_tests core_proxy unit_tests)
-set_property(TARGET gtest gtest_main hash-target-tests tests PROPERTY FOLDER "tests")
+set(enabled_tests
+    core_tests
+    difficulty
+    hash
+    performance_tests
+    core_proxy
+    fuzz
+    unit_tests)
+
+add_custom_target(tests DEPENDS enabled_tests)
+set_property(TARGET tests PROPERTY FOLDER "${folder}")

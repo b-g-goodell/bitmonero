@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -29,7 +29,8 @@
 // Parts of this file are originally copyright (c) 2012-2013 The Cryptonote developers
 
 #include "chaingen.h"
-#include "chaingen_tests_list.h"
+#include "tx_validation.h"
+#include "device/device.hpp"
 
 using namespace epee;
 using namespace crypto;
@@ -39,7 +40,7 @@ namespace
 {
   struct tx_builder
   {
-    void step1_init(size_t version = CURRENT_TRANSACTION_VERSION, uint64_t unlock_time = 0)
+    void step1_init(size_t version = 1, uint64_t unlock_time = 0)
     {
       m_tx.vin.clear();
       m_tx.vout.clear();
@@ -48,7 +49,7 @@ namespace
       m_tx.version = version;
       m_tx.unlock_time = unlock_time;
 
-      m_tx_key = keypair::generate();
+      m_tx_key = keypair::generate(hw::get_device("default"));
       add_tx_pub_key_to_extra(m_tx, m_tx_key.pub);
     }
 
@@ -59,7 +60,10 @@ namespace
         m_in_contexts.push_back(keypair());
         keypair& in_ephemeral = m_in_contexts.back();
         crypto::key_image img;
-        generate_key_image_helper(sender_account_keys, src_entr.real_out_tx_key, src_entr.real_output_in_tx_index, in_ephemeral, img);
+        std::unordered_map<crypto::public_key, cryptonote::subaddress_index> subaddresses;
+        subaddresses[sender_account_keys.m_account_address.m_spend_public_key] = {0,0};
+        auto& out_key = reinterpret_cast<const crypto::public_key&>(src_entr.outputs[src_entr.real_output].second.dest);
+        generate_key_image_helper(sender_account_keys, subaddresses, out_key, src_entr.real_out_tx_key, src_entr.real_out_additional_tx_keys, src_entr.real_output_in_tx_index, in_ephemeral, img, hw::get_device(("default")));
 
         // put key image into tx input
         txin_to_key input_to_key;
@@ -108,9 +112,13 @@ namespace
       BOOST_FOREACH(const tx_source_entry& src_entr, sources)
       {
         std::vector<const crypto::public_key*> keys_ptrs;
+        std::vector<crypto::public_key> keys(src_entr.outputs.size());
+        size_t j = 0;
         BOOST_FOREACH(const tx_source_entry::output_entry& o, src_entr.outputs)
         {
-          keys_ptrs.push_back(&o.second);
+          keys[j] = rct::rct2pk(o.second.dest);
+          keys_ptrs.push_back(&keys[j]);
+          ++j;
         }
 
         m_tx.signatures.push_back(std::vector<crypto::signature>());
@@ -136,7 +144,7 @@ namespace
     fill_tx_sources_and_destinations(events, blk_head, from, to, amount, TESTS_DEFAULT_FEE, 0, sources, destinations);
 
     tx_builder builder;
-    builder.step1_init(CURRENT_TRANSACTION_VERSION, unlock_time);
+    builder.step1_init(1, unlock_time);
     builder.step2_fill_inputs(from.get_keys(), sources);
     builder.step3_fill_outputs(destinations);
     builder.step4_calc_hash();
@@ -159,6 +167,15 @@ namespace
     throw std::runtime_error("invalid public key wasn't found");
     return crypto::public_key();
   }
+
+  crypto::key_image generate_invalid_key_image()
+  {
+    crypto::key_image key_image;
+    // a random key image plucked from the blockchain
+    if (!epee::string_tools::hex_to_pod("6b9f5d1be7c950dc6e4e258c6ef75509412ba9ecaaf90e6886140151d1365b5e", key_image))
+      throw std::runtime_error("invalid key image wasn't found");
+    return key_image;
+  }
 }
 
 //----------------------------------------------------------------------------------------------------------------------
@@ -177,7 +194,7 @@ bool gen_tx_big_version::generate(std::vector<test_event_entry>& events) const
   fill_tx_sources_and_destinations(events, blk_0, miner_account, miner_account, MK_COINS(1), TESTS_DEFAULT_FEE, 0, sources, destinations);
 
   tx_builder builder;
-  builder.step1_init(CURRENT_TRANSACTION_VERSION + 1, 0);
+  builder.step1_init(1 + 1, 0);
   builder.step2_fill_inputs(miner_account.get_keys(), sources);
   builder.step3_fill_outputs(destinations);
   builder.step4_calc_hash();
@@ -501,7 +518,7 @@ bool gen_tx_key_image_not_derive_from_tx_key::generate(std::vector<test_event_en
   builder.step2_fill_inputs(miner_account.get_keys(), sources);
 
   txin_to_key& in_to_key = boost::get<txin_to_key>(builder.m_tx.vin.front());
-  keypair kp = keypair::generate();
+  keypair kp = keypair::generate(hw::get_device("default"));
   key_image another_ki;
   crypto::generate_key_image(kp.pub, kp.sec, another_ki);
   in_to_key.k_image = another_ki;
@@ -537,8 +554,7 @@ bool gen_tx_key_image_is_invalid::generate(std::vector<test_event_entry>& events
   builder.step2_fill_inputs(miner_account.get_keys(), sources);
 
   txin_to_key& in_to_key = boost::get<txin_to_key>(builder.m_tx.vin.front());
-  crypto::public_key pub = generate_invalid_pub_key();
-  memcpy(&in_to_key.k_image, &pub, sizeof(crypto::ec_point));
+  in_to_key.k_image = generate_invalid_key_image();
 
   builder.step3_fill_outputs(destinations);
   builder.step4_calc_hash();

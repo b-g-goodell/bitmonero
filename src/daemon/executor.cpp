@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -26,15 +26,17 @@
 // STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#include "daemon/executor.h"
-
 #include "misc_log_ex.h"
 
-#include "common/command_line.h"
+#include "daemon/executor.h"
+
 #include "cryptonote_config.h"
 #include "version.h"
 
 #include <string>
+
+#undef MONERO_DEFAULT_LOG_CATEGORY
+#define MONERO_DEFAULT_LOG_CATEGORY "daemon"
 
 namespace daemonize
 {
@@ -56,15 +58,21 @@ namespace daemonize
       boost::program_options::variables_map const & vm
     )
   {
-    LOG_PRINT_L0(CRYPTONOTE_NAME << " v" << MONERO_VERSION_FULL);
+    LOG_PRINT_L0("Monero '" << MONERO_RELEASE_NAME << "' (v" << MONERO_VERSION_FULL << ") Daemonised");
     return t_daemon{vm};
+  }
+
+  bool t_executor::run_non_interactive(
+      boost::program_options::variables_map const & vm
+    )
+  {
+    return t_daemon{vm}.run(false);
   }
 
   bool t_executor::run_interactive(
       boost::program_options::variables_map const & vm
     )
   {
-    epee::log_space::log_singletone::add_logger(LOGGER_CONSOLE, NULL, NULL);
     return t_daemon{vm}.run(true);
   }
 }

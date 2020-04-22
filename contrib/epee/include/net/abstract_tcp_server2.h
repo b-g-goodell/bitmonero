@@ -54,9 +54,11 @@
 #include <boost/thread/thread.hpp>
 #include "net_utils_base.h"
 #include "syncobj.h"
-#include "../../../../src/p2p/connection_basic.hpp"
-#include "../../../../contrib/otshell_utils/utils.hpp"
-#include "../../../../src/p2p/network_throttle-detail.hpp"
+#include "connection_basic.hpp"
+#include "network_throttle-detail.hpp"
+
+#undef MONERO_DEFAULT_LOG_CATEGORY
+#define MONERO_DEFAULT_LOG_CATEGORY "net"
 
 #define ABSTRACT_SERVER_SEND_QUE_MAX_COUNT 1000
 
@@ -67,7 +69,7 @@ namespace net_utils
 
   struct i_connection_filter
   {
-    virtual bool is_remote_ip_allowed(uint32_t adress)=0;
+    virtual bool is_remote_host_allowed(const epee::net_utils::network_address &address)=0;
   protected:
     virtual ~i_connection_filter(){}
   };
@@ -95,7 +97,7 @@ namespace net_utils
 			i_connection_filter * &pfilter
 			,t_connection_type connection_type);
 
-    virtual ~connection();
+    virtual ~connection() noexcept(false);
     /// Get the socket associated with the connection.
     boost::asio::ip::tcp::socket& socket();
 
@@ -153,8 +155,8 @@ namespace net_utils
     // for calculate speed (last 60 sec)
     network_throttle m_throttle_speed_in;
     network_throttle m_throttle_speed_out;
-    std::mutex m_throttle_speed_in_mutex;
-    std::mutex m_throttle_speed_out_mutex;
+    boost::mutex m_throttle_speed_in_mutex;
+    boost::mutex m_throttle_speed_out_mutex;
 
 	public:
 			void setRpcStation();
@@ -205,11 +207,17 @@ namespace net_utils
 
     bool connect(const std::string& adr, const std::string& port, uint32_t conn_timeot, t_connection_context& cn, const std::string& bind_ip = "0.0.0.0");
     template<class t_callback>
-    bool connect_async(const std::string& adr, const std::string& port, uint32_t conn_timeot, t_callback cb, const std::string& bind_ip = "0.0.0.0");
+    bool connect_async(const std::string& adr, const std::string& port, uint32_t conn_timeot, const t_callback &cb, const std::string& bind_ip = "0.0.0.0");
 
     typename t_protocol_handler::config_type& get_config_object(){return m_config;}
 
     int get_binded_port(){return m_port;}
+
+    long get_connections_count() const
+    {
+      auto connections_count = (m_sock_count > 0) ? (m_sock_count - 1) : 0; // Socket count minus listening socket
+      return connections_count;
+    }
 
     boost::asio::io_service& get_io_service(){return io_service_;}
 
@@ -279,8 +287,6 @@ namespace net_utils
 
     bool is_thread_worker();
 
-    bool cleanup_connections();
-
     /// The io_service used to perform asynchronous operations.
     std::unique_ptr<boost::asio::io_service> m_io_service_local_instance;
     boost::asio::io_service& io_service_;    
@@ -300,15 +306,14 @@ namespace net_utils
     boost::thread::id m_main_thread_id;
     critical_section m_threads_lock;
     volatile uint32_t m_thread_index; // TODO change to std::atomic
-    void detach_threads();
 
     t_connection_type m_connection_type;
 
     /// The next connection to be accepted
     connection_ptr new_connection_;
 
-    std::mutex connections_mutex;
-    std::deque<std::pair<boost::system_time, connection_ptr>> connections_;
+    boost::mutex connections_mutex;
+    std::set<connection_ptr> connections_;
 
   }; // class <>boosted_tcp_server
 

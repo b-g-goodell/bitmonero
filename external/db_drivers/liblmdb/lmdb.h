@@ -78,6 +78,11 @@
  *	  access to locks and lock file. Exceptions: On read-only filesystems
  *	  or with the #MDB_NOLOCK flag described under #mdb_env_open().
  *
+ *	- An LMDB configuration will often reserve considerable \b unused
+ *	  memory address space and maybe file size for future growth.
+ *	  This does not use actual memory or disk space, but users may need
+ *	  to understand the difference so they won't be scared off.
+ *
  *	- By default, in versions before 0.9.10, unused portions of the data
  *	  file might receive garbage data from memory freed by other code.
  *	  (This does not happen when using the #MDB_WRITEMAP flag.) As of
@@ -130,7 +135,7 @@
  *
  *	@author	Howard Chu, Symas Corporation.
  *
- *	@copyright Copyright 2011-2015 Howard Chu, Symas Corp. All rights reserved.
+ *	@copyright Copyright 2011-2016 Howard Chu, Symas Corp. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted only as authorized by the OpenLDAP
@@ -176,7 +181,7 @@ typedef	mode_t	mdb_mode_t;
 
 #ifdef MDB_VL32
 typedef uint64_t	mdb_size_t;
-#define mdb_env_create(env)	mdb_env_create_vl32(env)	/**< Prevent mixing with non-VL32 builds */
+#define mdb_env_create	mdb_env_create_vl32	/**< Prevent mixing with non-VL32 builds */
 #else
 typedef size_t	mdb_size_t;
 #endif
@@ -306,6 +311,8 @@ typedef void (MDB_rel_func)(MDB_val *item, void *oldptr, void *newptr, void *rel
 #define MDB_NORDAHEAD	0x800000
 	/** don't initialize malloc'd memory before writing to datafile */
 #define MDB_NOMEMINIT	0x1000000
+	/** use the previous snapshot rather than the latest one */
+#define MDB_PREVSNAPSHOT	0x2000000
 /** @} */
 
 /**	@defgroup	mdb_dbi_open	Database Flags
@@ -392,7 +399,9 @@ typedef enum MDB_cursor_op {
 	MDB_PREV_NODUP,			/**< Position at last data item of previous key */
 	MDB_SET,				/**< Position at specified key */
 	MDB_SET_KEY,			/**< Position at specified key, return key + data */
-	MDB_SET_RANGE			/**< Position at first key greater than or equal to specified key. */
+	MDB_SET_RANGE,			/**< Position at first key greater than or equal to specified key. */
+	MDB_PREV_MULTIPLE		/**< Position at previous page and return key and up to
+								a page of duplicate data items. Only for #MDB_DUPFIXED */
 } MDB_cursor_op;
 
 /** @defgroup  errors	Return Codes
@@ -538,9 +547,11 @@ int  mdb_env_create(MDB_env **env);
 	 *		allowed. LMDB will still modify the lock file - except on read-only
 	 *		filesystems, where LMDB does not use locks.
 	 *	<li>#MDB_WRITEMAP
-	 *		Use a writeable memory map unless MDB_RDONLY is set. This is faster
-	 *		and uses fewer mallocs, but loses protection from application bugs
+	 *		Use a writeable memory map unless MDB_RDONLY is set. This uses
+	 *		fewer mallocs but loses protection from application bugs
 	 *		like wild pointer writes and other bad updates into the database.
+	 *		This may be slightly faster for DBs that fit entirely in RAM, but
+	 *		is slower for DBs larger than RAM.
 	 *		Incompatible with nested transactions.
 	 *		Do not mix processes with and without MDB_WRITEMAP on the same
 	 *		environment.  This can defeat durability (#mdb_env_sync etc).
@@ -613,6 +624,12 @@ int  mdb_env_create(MDB_env **env);
 	 *		caller is expected to overwrite all of the memory that was
 	 *		reserved in that case.
 	 *		This flag may be changed at any time using #mdb_env_set_flags().
+	 *	<li>#MDB_PREVSNAPSHOT
+	 *		Open the environment with the previous snapshot rather than the latest
+	 *		one. This loses the latest transaction, but may help work around some
+	 *		types of corruption. If opened with write access, this must be the
+	 *		only process using the environment. This flag is automatically reset
+	 *		after a write transaction is successfully committed.
 	 * </ul>
 	 * @param[in] mode The UNIX permissions to set on created files and semaphores.
 	 * This parameter is ignored on Windows.
@@ -1535,7 +1552,7 @@ int  mdb_cursor_del(MDB_cursor *cursor, unsigned int flags);
 	 *	<li>EINVAL - cursor is not initialized, or an invalid parameter was specified.
 	 * </ul>
 	 */
-int  mdb_cursor_count(MDB_cursor *cursor, size_t *countp);
+int  mdb_cursor_count(MDB_cursor *cursor, mdb_size_t *countp);
 
 	/** @brief Compare two data items according to a particular database.
 	 *

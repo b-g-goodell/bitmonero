@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -29,7 +29,7 @@
 // Parts of this file are originally copyright (c) 2012-2013 The Cryptonote developers
 
 #include "chaingen.h"
-#include "chaingen_tests_list.h"
+#include "block_validation.h"
 
 using namespace epee;
 using namespace cryptonote;
@@ -38,7 +38,7 @@ namespace
 {
   bool lift_up_difficulty(std::vector<test_event_entry>& events, std::vector<uint64_t>& timestamps,
                           std::vector<difficulty_type>& cummulative_difficulties, test_generator& generator,
-                          size_t new_block_count, const block blk_last, const account_base& miner_account)
+                          size_t new_block_count, const block &blk_last, const account_base& miner_account)
   {
     difficulty_type commulative_diffic = cummulative_difficulties.empty() ? 0 : cummulative_difficulties.back();
     block blk_prev = blk_last;
@@ -335,8 +335,9 @@ bool gen_block_miner_tx_has_2_in::generate(std::vector<test_event_entry>& events
 
   tx_source_entry se;
   se.amount = blk_0.miner_tx.vout[0].amount;
-  se.outputs.push_back(std::make_pair(0, boost::get<txout_to_key>(blk_0.miner_tx.vout[0].target).key));
+  se.push_output(0, boost::get<txout_to_key>(blk_0.miner_tx.vout[0].target).key, se.amount);
   se.real_output = 0;
+  se.rct = false;
   se.real_out_tx_key = get_tx_pub_key_from_extra(blk_0.miner_tx);
   se.real_output_in_tx_index = 0;
   std::vector<tx_source_entry> sources;
@@ -349,7 +350,7 @@ bool gen_block_miner_tx_has_2_in::generate(std::vector<test_event_entry>& events
   destinations.push_back(de);
 
   transaction tmp_tx;
-  if (!construct_tx(miner_account.get_keys(), sources, destinations, std::vector<uint8_t>(), tmp_tx, 0))
+  if (!construct_tx(miner_account.get_keys(), sources, destinations, boost::none, std::vector<uint8_t>(), tmp_tx, 0))
     return false;
 
   MAKE_MINER_TX_MANUALLY(miner_tx, blk_0);
@@ -377,8 +378,9 @@ bool gen_block_miner_tx_with_txin_to_key::generate(std::vector<test_event_entry>
 
   tx_source_entry se;
   se.amount = blk_1.miner_tx.vout[0].amount;
-  se.outputs.push_back(std::make_pair(0, boost::get<txout_to_key>(blk_1.miner_tx.vout[0].target).key));
+  se.push_output(0, boost::get<txout_to_key>(blk_1.miner_tx.vout[0].target).key, se.amount);
   se.real_output = 0;
+  se.rct = false;
   se.real_out_tx_key = get_tx_pub_key_from_extra(blk_1.miner_tx);
   se.real_output_in_tx_index = 0;
   std::vector<tx_source_entry> sources;
@@ -391,7 +393,7 @@ bool gen_block_miner_tx_with_txin_to_key::generate(std::vector<test_event_entry>
   destinations.push_back(de);
 
   transaction tmp_tx;
-  if (!construct_tx(miner_account.get_keys(), sources, destinations, std::vector<uint8_t>(), tmp_tx, 0))
+  if (!construct_tx(miner_account.get_keys(), sources, destinations, boost::none, std::vector<uint8_t>(), tmp_tx, 0))
     return false;
 
   MAKE_MINER_TX_MANUALLY(miner_tx, blk_1);
@@ -505,7 +507,7 @@ bool gen_block_is_too_big::generate(std::vector<test_event_entry>& events) const
 
   // Creating a huge miner_tx, it will have a lot of outs
   MAKE_MINER_TX_MANUALLY(miner_tx, blk_0);
-  static const size_t tx_out_count = CRYPTONOTE_BLOCK_GRANTED_FULL_REWARD_ZONE / 2;
+  static const size_t tx_out_count = CRYPTONOTE_BLOCK_GRANTED_FULL_REWARD_ZONE_V1 / 2;
   uint64_t amount = get_outs_money_amount(miner_tx);
   uint64_t portion = amount / tx_out_count;
   uint64_t remainder = amount % tx_out_count;

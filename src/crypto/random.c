@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -42,10 +42,15 @@ static void generate_system_random_bytes(size_t n, void *result);
 
 #include <windows.h>
 #include <wincrypt.h>
+#include <stdio.h>
 
 static void generate_system_random_bytes(size_t n, void *result) {
   HCRYPTPROV prov;
-#define must_succeed(x) do if (!(x)) assert(0); while (0)
+#ifdef NDEBUG
+#define must_succeed(x) do if (!(x)) { fprintf(stderr, "Failed: " #x); _exit(1); } while (0)
+#else
+#define must_succeed(x) do if (!(x)) abort(); while (0)
+#endif
   must_succeed(CryptAcquireContext(&prov, NULL, NULL, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT | CRYPT_SILENT));
   must_succeed(CryptGenRandom(prov, (DWORD)n, result));
   must_succeed(CryptReleaseContext(prov, 0));
@@ -113,7 +118,7 @@ INITIALIZER(init_random) {
 #endif
 }
 
-void generate_random_bytes(size_t n, void *result) {
+void generate_random_bytes_not_thread_safe(size_t n, void *result) {
 #if !defined(NDEBUG)
   assert(curstate == 1);
   curstate = 2;

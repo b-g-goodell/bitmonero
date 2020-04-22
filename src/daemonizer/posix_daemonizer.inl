@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -43,6 +43,14 @@ namespace daemonizer
       "detach"
     , "Run as daemon"
     };
+    const command_line::arg_descriptor<std::string> arg_pidfile = {
+      "pidfile"
+    , "File path to write the daemon's PID to (optional, requires --detach)"
+    };
+    const command_line::arg_descriptor<bool> arg_non_interactive = {
+      "non-interactive"
+    , "Run non-interactive"
+    };
   }
 
   inline void init_options(
@@ -51,6 +59,8 @@ namespace daemonizer
     )
   {
     command_line::add_arg(normal_options, arg_detach);
+    command_line::add_arg(normal_options, arg_pidfile);
+    command_line::add_arg(normal_options, arg_non_interactive);
   }
 
   inline boost::filesystem::path get_default_data_dir()
@@ -75,13 +85,22 @@ namespace daemonizer
     if (command_line::has_arg(vm, arg_detach))
     {
       tools::success_msg_writer() << "Forking to background...";
-      posix::fork();
+      std::string pidfile;
+      if (command_line::has_arg(vm, arg_pidfile))
+      {
+        pidfile = command_line::get_arg(vm, arg_pidfile);
+      }
+      posix::fork(pidfile);
       auto daemon = executor.create_daemon(vm);
       return daemon.run();
     }
+    else if (command_line::has_arg(vm, arg_non_interactive))
+    {
+      return executor.run_non_interactive(vm);
+    }
     else
     {
-      //LOG_PRINT_L0(CRYPTONOTE_NAME << " v" << MONERO_VERSION_FULL);
+      //LOG_PRINT_L0("Monero '" << MONERO_RELEASE_NAME << "' (v" << MONERO_VERSION_FULL);
       return executor.run_interactive(vm);
     }
   }

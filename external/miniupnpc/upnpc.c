@@ -1,7 +1,7 @@
-/* $Id: upnpc.c,v 1.104 2014/09/11 14:13:30 nanard Exp $ */
+/* $Id: upnpc.c,v 1.117 2017/05/26 15:26:55 nanard Exp $ */
 /* Project : miniupnp
  * Author : Thomas Bernard
- * Copyright (c) 2005-2014 Thomas Bernard
+ * Copyright (c) 2005-2017 Thomas Bernard
  * This software is subject to the conditions detailed in the
  * LICENCE file provided in this distribution. */
 
@@ -16,10 +16,12 @@
 /* for IPPROTO_TCP / IPPROTO_UDP */
 #include <netinet/in.h>
 #endif
+#include <ctype.h>
 #include "miniwget.h"
 #include "miniupnpc.h"
 #include "upnpcommands.h"
 #include "upnperrors.h"
+#include "miniupnpcstrings.h"
 
 /* protofix() checks if protocol is "UDP" or "TCP"
  * returns NULL if not */
@@ -41,6 +43,22 @@ const char * protofix(const char * proto)
 	return 0;
 }
 
+/* is_int() checks if parameter is an integer or not
+ * 1 for integer
+ * 0 for not an integer */
+int is_int(char const* s)
+{
+	if(s == NULL)
+		return 0;
+	while(*s) {
+		/* #define isdigit(c) ((c) >= '0' && (c) <= '9') */
+		if(!isdigit(*s))
+			return 0;
+		s++;
+	}
+	return 1;
+}
+
 static void DisplayInfos(struct UPNPUrls * urls,
                          struct IGDdatas * data)
 {
@@ -48,7 +66,7 @@ static void DisplayInfos(struct UPNPUrls * urls,
 	char connectionType[64];
 	char status[64];
 	char lastconnerr[64];
-	unsigned int uptime;
+	unsigned int uptime = 0;
 	unsigned int brUp, brDown;
 	time_t timenow, timestarted;
 	int r;
@@ -64,9 +82,11 @@ static void DisplayInfos(struct UPNPUrls * urls,
 	else
 		printf("Status : %s, uptime=%us, LastConnectionError : %s\n",
 		       status, uptime, lastconnerr);
-	timenow = time(NULL);
-	timestarted = timenow - uptime;
-	printf("  Time started : %s", ctime(&timestarted));
+	if(uptime > 0) {
+		timenow = time(NULL);
+		timestarted = timenow - uptime;
+		printf("  Time started : %s", ctime(&timestarted));
+	}
 	if(UPNP_GetLinkLayerMaxBitRates(urls->controlURL_CIF, data->CIF.servicetype,
 	                                &brDown, &brUp) != UPNPCOMMAND_SUCCESS) {
 		printf("GetLinkLayerMaxBitRates failed.\n");
@@ -174,7 +194,7 @@ static void NewListRedirections(struct UPNPUrls * urls,
 	if(r == UPNPCOMMAND_SUCCESS)
 	{
 		printf(" i protocol exPort->inAddr:inPort description remoteHost leaseTime\n");
-		for(pm = pdata.head.lh_first; pm != NULL; pm = pm->entries.le_next)
+		for(pm = pdata.l_head; pm != NULL; pm = pm->l_next)
 		{
 			printf("%2d %s %5hu->%s:%-5hu '%s' '%s' %u\n",
 			       i, pm->protocol, pm->externalPort, pm->internalClient,
@@ -199,7 +219,7 @@ static void NewListRedirections(struct UPNPUrls * urls,
 	                               &pdata);
 	if(r == UPNPCOMMAND_SUCCESS)
 	{
-		for(pm = pdata.head.lh_first; pm != NULL; pm = pm->entries.le_next)
+		for(pm = pdata.l_head; pm != NULL; pm = pm->l_next)
 		{
 			printf("%2d %s %5hu->%s:%-5hu '%s' '%s' %u\n",
 			       i, pm->protocol, pm->externalPort, pm->internalClient,
@@ -222,7 +242,7 @@ static void NewListRedirections(struct UPNPUrls * urls,
  * 2 - get extenal ip address
  * 3 - Add port mapping
  * 4 - get this port mapping from the IGD */
-static void SetRedirectAndTest(struct UPNPUrls * urls,
+static int SetRedirectAndTest(struct UPNPUrls * urls,
 			       struct IGDdatas * data,
 			       const char * iaddr,
 			       const char * iport,
@@ -242,13 +262,13 @@ static void SetRedirectAndTest(struct UPNPUrls * urls,
 	if(!iaddr || !iport || !eport || !proto)
 	{
 		fprintf(stderr, "Wrong arguments\n");
-		return;
+		return -1;
 	}
 	proto = protofix(proto);
 	if(!proto)
 	{
 		fprintf(stderr, "invalid protocol\n");
-		return;
+		return -1;
 	}
 
 	r = UPNP_GetExternalIPAddress(urls->controlURL,
@@ -272,9 +292,11 @@ static void SetRedirectAndTest(struct UPNPUrls * urls,
 		r = UPNP_AddPortMapping(urls->controlURL, data->first.servicetype,
 					eport, iport, iaddr, description,
 					proto, 0, leaseDuration);
-		if(r!=UPNPCOMMAND_SUCCESS)
+		if(r!=UPNPCOMMAND_SUCCESS) {
 			printf("AddPortMapping(%s, %s, %s) failed with code %d (%s)\n",
 			       eport, iport, iaddr, r, strupnperror(r));
+			return -2;
+	}
 	}
 
 	r = UPNP_GetSpecificPortMappingEntry(urls->controlURL,
@@ -282,17 +304,19 @@ static void SetRedirectAndTest(struct UPNPUrls * urls,
 					     eport, proto, NULL/*remoteHost*/,
 					     intClient, intPort, NULL/*desc*/,
 					     NULL/*enabled*/, duration);
-	if(r!=UPNPCOMMAND_SUCCESS)
+	if(r!=UPNPCOMMAND_SUCCESS) {
 		printf("GetSpecificPortMappingEntry() failed with code %d (%s)\n",
 		       r, strupnperror(r));
-	else {
+		return -2;
+	} else {
 		printf("InternalIP:Port = %s:%s\n", intClient, intPort);
 		printf("external %s:%s %s is redirected to internal %s:%s (duration=%s)\n",
 		       externalIPAddress, eport, proto, intClient, intPort, duration);
 	}
+	return 0;
 }
 
-static void
+static int
 RemoveRedirect(struct UPNPUrls * urls,
                struct IGDdatas * data,
                const char * eport,
@@ -303,19 +327,25 @@ RemoveRedirect(struct UPNPUrls * urls,
 	if(!proto || !eport)
 	{
 		fprintf(stderr, "invalid arguments\n");
-		return;
+		return -1;
 	}
 	proto = protofix(proto);
 	if(!proto)
 	{
 		fprintf(stderr, "protocol invalid\n");
-		return;
+		return -1;
 	}
 	r = UPNP_DeletePortMapping(urls->controlURL, data->first.servicetype, eport, proto, remoteHost);
-	printf("UPNP_DeletePortMapping() returned : %d\n", r);
+	if(r!=UPNPCOMMAND_SUCCESS) {
+		printf("UPNP_DeletePortMapping() failed with code : %d\n", r);
+		return -2;
+	}else {
+		printf("UPNP_DeletePortMapping() returned : %d\n", r);
+	}
+	return 0;
 }
 
-static void
+static int
 RemoveRedirectRange(struct UPNPUrls * urls,
 		    struct IGDdatas * data,
 		    const char * ePortStart, char const * ePortEnd,
@@ -329,16 +359,22 @@ RemoveRedirectRange(struct UPNPUrls * urls,
 	if(!proto || !ePortStart || !ePortEnd)
 	{
 		fprintf(stderr, "invalid arguments\n");
-		return;
+		return -1;
 	}
 	proto = protofix(proto);
 	if(!proto)
 	{
 		fprintf(stderr, "protocol invalid\n");
-		return;
+		return -1;
 	}
 	r = UPNP_DeletePortMappingRange(urls->controlURL, data->first.servicetype, ePortStart, ePortEnd, proto, manage);
-	printf("UPNP_DeletePortMappingRange() returned : %d\n", r);
+	if(r!=UPNPCOMMAND_SUCCESS) {
+		printf("UPNP_DeletePortMappingRange() failed with code : %d\n", r);
+		return -2;
+	}else {
+		printf("UPNP_DeletePortMappingRange() returned : %d\n", r);
+	}
+	return 0;
 }
 
 /* IGD:2, functions for service WANIPv6FirewallControl:1 */
@@ -520,14 +556,16 @@ int main(int argc, char ** argv)
 	char ** commandargv = 0;
 	int commandargc = 0;
 	struct UPNPDev * devlist = 0;
-	char lanaddr[64];	/* my ip address on the LAN */
+	char lanaddr[64] = "unset";	/* my ip address on the LAN */
 	int i;
 	const char * rootdescurl = 0;
 	const char * multicastif = 0;
 	const char * minissdpdpath = 0;
+	int localport = UPNP_LOCAL_PORT_ANY;
 	int retcode = 0;
 	int error = 0;
 	int ipv6 = 0;
+	unsigned char ttl = 2;	/* defaulting to 2 */
 	const char * description = 0;
 
 #ifdef _WIN32
@@ -539,8 +577,9 @@ int main(int argc, char ** argv)
 		return -1;
 	}
 #endif
-    printf("upnpc : miniupnpc library test client. (c) 2005-2014 Thomas Bernard\n");
-    printf("Go to http://miniupnp.free.fr/ or http://miniupnp.tuxfamily.org/\n"
+    printf("upnpc : miniupnpc library test client, version %s.\n", MINIUPNPC_VERSION_STRING);
+	printf(" (c) 2005-2017 Thomas Bernard.\n");
+    printf("Go to http://miniupnp.free.fr/ or https://miniupnp.tuxfamily.org/\n"
 	       "for more information.\n");
 	/* command line processing */
 	for(i=1; i<argc; i++)
@@ -556,12 +595,26 @@ int main(int argc, char ** argv)
 				rootdescurl = argv[++i];
 			else if(argv[i][1] == 'm')
 				multicastif = argv[++i];
+			else if(argv[i][1] == 'z')
+			{
+				char junk;
+				if(sscanf(argv[++i], "%d%c", &localport, &junk)!=1 ||
+					localport<0 || localport>65535 ||
+				   (localport >1 && localport < 1024))
+				{
+					fprintf(stderr, "Invalid localport '%s'\n", argv[i]);
+					localport = UPNP_LOCAL_PORT_ANY;
+					break;
+				}
+			}
 			else if(argv[i][1] == 'p')
 				minissdpdpath = argv[++i];
 			else if(argv[i][1] == '6')
 				ipv6 = 1;
 			else if(argv[i][1] == 'e')
 				description = argv[++i];
+			else if(argv[i][1] == 't')
+				ttl = (unsigned char)atoi(argv[++i]);
 			else
 			{
 				command = argv[i][1];
@@ -577,7 +630,8 @@ int main(int argc, char ** argv)
 		}
 	}
 
-	if(!command || (command == 'a' && commandargc<4)
+	if(!command
+	   || (command == 'a' && commandargc<4)
 	   || (command == 'd' && argc<2)
 	   || (command == 'r' && argc<2)
 	   || (command == 'A' && commandargc<6)
@@ -591,7 +645,7 @@ int main(int argc, char ** argv)
 		fprintf(stderr, "       \t%s [options] -L\n\t\tList redirections (using GetListOfPortMappings (for IGD:2 only)\n", argv[0]);
 		fprintf(stderr, "       \t%s [options] -n ip port external_port protocol [duration]\n\t\tAdd (any) port redirection allowing IGD to use alternative external_port (for IGD:2 only)\n", argv[0]);
 		fprintf(stderr, "       \t%s [options] -N external_port_start external_port_end protocol [manage]\n\t\tDelete range of port redirections (for IGD:2 only)\n", argv[0]);
-		fprintf(stderr, "       \t%s [options] -r port1 protocol1 [port2 protocol2] [...]\n\t\tAdd all redirections to the current host\n", argv[0]);
+		fprintf(stderr, "       \t%s [options] -r port1 [external_port1] protocol1 [port2 [external_port2] protocol2] [...]\n\t\tAdd all redirections to the current host\n", argv[0]);
 		fprintf(stderr, "       \t%s [options] -A remote_ip remote_port internal_ip internal_port protocol lease_time\n\t\tAdd Pinhole (for IGD:2 only)\n", argv[0]);
 		fprintf(stderr, "       \t%s [options] -U uniqueID new_lease_time\n\t\tUpdate Pinhole (for IGD:2 only)\n", argv[0]);
 		fprintf(stderr, "       \t%s [options] -C uniqueID\n\t\tCheck if Pinhole is Working (for IGD:2 only)\n", argv[0]);
@@ -606,13 +660,15 @@ int main(int argc, char ** argv)
 		fprintf(stderr, "  -6 : use ip v6 instead of ip v4.\n");
 		fprintf(stderr, "  -u url : bypass discovery process by providing the XML root description url.\n");
 		fprintf(stderr, "  -m address/interface : provide ip address (ip v4) or interface name (ip v4 or v6) to use for sending SSDP multicast packets.\n");
+		fprintf(stderr, "  -z localport : SSDP packets local (source) port (1024-65535).\n");
 		fprintf(stderr, "  -p path : use this path for MiniSSDPd socket.\n");
+		fprintf(stderr, "  -t ttl : set multicast TTL. Default value is 2.\n");
 		return 1;
 	}
 
 	if( rootdescurl
 	  || (devlist = upnpDiscover(2000, multicastif, minissdpdpath,
-	                             0/*sameport*/, ipv6, &error)))
+	                             localport, ipv6, ttl, &error)))
 	{
 		struct UPNPDev * device;
 		struct UPNPUrls urls;
@@ -626,7 +682,7 @@ int main(int argc, char ** argv)
 					   device->descURL, device->st);
 			}
 		}
-		else
+		else if(!rootdescurl)
 		{
 			printf("upnpDiscover() error code=%d\n", error);
 		}
@@ -671,41 +727,63 @@ int main(int argc, char ** argv)
 				NewListRedirections(&urls, &data);
 				break;
 			case 'a':
-				SetRedirectAndTest(&urls, &data,
+				if (SetRedirectAndTest(&urls, &data,
 						   commandargv[0], commandargv[1],
 						   commandargv[2], commandargv[3],
 						   (commandargc > 4)?commandargv[4]:"0",
-						   description, 0);
+						   description, 0) < 0)
+					retcode = 2;
 				break;
 			case 'd':
-				RemoveRedirect(&urls, &data, commandargv[0], commandargv[1],
-				               commandargc > 2 ? commandargv[2] : NULL);
+				if (RemoveRedirect(&urls, &data, commandargv[0], commandargv[1],
+				               commandargc > 2 ? commandargv[2] : NULL) < 0)
+					retcode = 2;
 				break;
 			case 'n':	/* aNy */
-				SetRedirectAndTest(&urls, &data,
+				if (SetRedirectAndTest(&urls, &data,
 						   commandargv[0], commandargv[1],
 						   commandargv[2], commandargv[3],
 						   (commandargc > 4)?commandargv[4]:"0",
-						   description, 1);
+						   description, 1) < 0)
+					retcode = 2;
 				break;
 			case 'N':
 				if (commandargc < 3)
 					fprintf(stderr, "too few arguments\n");
 
-				RemoveRedirectRange(&urls, &data, commandargv[0], commandargv[1], commandargv[2],
-						    commandargc > 3 ? commandargv[3] : NULL);
+				if (RemoveRedirectRange(&urls, &data, commandargv[0], commandargv[1], commandargv[2],
+						    commandargc > 3 ? commandargv[3] : NULL) < 0)
+					retcode = 2;
 				break;
 			case 's':
 				GetConnectionStatus(&urls, &data);
 				break;
 			case 'r':
-				for(i=0; i<commandargc; i+=2)
+				i = 0;
+				while(i<commandargc)
 				{
-					/*printf("port %s protocol %s\n", argv[i], argv[i+1]);*/
-					SetRedirectAndTest(&urls, &data,
-							   lanaddr, commandargv[i],
-							   commandargv[i], commandargv[i+1], "0",
-							   description, 0);
+					if(!is_int(commandargv[i])) {
+						/* 1st parameter not an integer : error */
+						fprintf(stderr, "command -r : %s is not an port number\n", commandargv[i]);
+						retcode = 1;
+						break;
+					} else if(is_int(commandargv[i+1])){
+						/* 2nd parameter is an integer : <port> <external_port> <protocol> */
+						if (SetRedirectAndTest(&urls, &data,
+								   lanaddr, commandargv[i],
+								   commandargv[i+1], commandargv[i+2], "0",
+								   description, 0) < 0)
+							retcode = 2;
+						i+=3;	/* 3 parameters parsed */
+					} else {
+						/* 2nd parameter not an integer : <port> <protocol> */
+						if (SetRedirectAndTest(&urls, &data,
+								   lanaddr, commandargv[i],
+								   commandargv[i], commandargv[i+1], "0",
+								   description, 0) < 0)
+							retcode = 2;
+						i+=2;	/* 2 parameters parsed */
+					}
 				}
 				break;
 			case 'A':
@@ -768,6 +846,12 @@ int main(int argc, char ** argv)
 		fprintf(stderr, "No IGD UPnP Device found on the network !\n");
 		retcode = 1;
 	}
+#ifdef _WIN32
+	nResult = WSACleanup();
+	if(nResult != NO_ERROR) {
+		fprintf(stderr, "WSACleanup() failed.\n");
+	}
+#endif /* _WIN32 */
 	return retcode;
 }
 

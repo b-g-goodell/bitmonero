@@ -27,12 +27,23 @@
 #pragma once
 
 #include "misc_log_ex.h"
+#include "string_tools.h"
 #include <atomic>
 #include <condition_variable>
 #include <functional>
 #include <mutex>
 #include <thread>
 #include <iostream>
+#ifdef __OpenBSD__
+#include <stdio.h>
+#endif
+#include <boost/thread.hpp>
+#include <boost/algorithm/string/classification.hpp>
+#include <boost/algorithm/string/split.hpp>
+
+#ifdef HAVE_READLINE
+  #include "readline_buffer.h"
+#endif
 
 namespace epee
 {
@@ -44,13 +55,23 @@ namespace epee
       , m_has_read_request(false)
       , m_read_status(state_init)
     {
-      m_reader_thread = std::thread(std::bind(&async_stdin_reader::reader_thread_func, this));
+#ifdef HAVE_READLINE
+      m_readline_buffer.start();
+#endif
+      m_reader_thread = boost::thread(std::bind(&async_stdin_reader::reader_thread_func, this));
     }
 
     ~async_stdin_reader()
     {
       stop();
     }
+
+#ifdef HAVE_READLINE
+    rdln::readline_buffer& get_readline_buffer()
+    {
+      return m_readline_buffer;
+    }
+#endif
 
     // Not thread safe. Only one thread can call this method at once.
     bool get_line(std::string& line)
@@ -61,7 +82,7 @@ namespace epee
       if (state_eos == m_read_status)
         return false;
 
-      std::unique_lock<std::mutex> lock(m_response_mutex);
+      boost::unique_lock<boost::mutex> lock(m_response_mutex);
       while (state_init == m_read_status)
       {
         m_response_cv.wait(lock);
@@ -94,13 +115,16 @@ namespace epee
 
         m_request_cv.notify_one();
         m_reader_thread.join();
+#ifdef HAVE_READLINE
+        m_readline_buffer.stop();
+#endif
       }
     }
 
   private:
     bool start_read()
     {
-      std::unique_lock<std::mutex> lock(m_request_mutex);
+      boost::unique_lock<boost::mutex> lock(m_request_mutex);
       if (!m_run.load(std::memory_order_relaxed) || m_has_read_request)
         return false;
 
@@ -111,7 +135,7 @@ namespace epee
 
     bool wait_read()
     {
-      std::unique_lock<std::mutex> lock(m_request_mutex);
+      boost::unique_lock<boost::mutex> lock(m_request_mutex);
       while (m_run.load(std::memory_order_relaxed) && !m_has_read_request)
       {
         m_request_cv.wait(lock);
@@ -129,7 +153,11 @@ namespace epee
     bool wait_stdin_data()
     {
 #if !defined(WIN32)
+      #if defined(__OpenBSD__) || defined(__ANDROID__)
+      int stdin_fileno = fileno(stdin);
+      #else
       int stdin_fileno = ::fileno(stdin);
+      #endif
 
       while (m_run.load(std::memory_order_relaxed))
       {
@@ -147,6 +175,20 @@ namespace epee
         else if (0 < retval)
           return true;
       }
+#else
+      while (m_run.load(std::memory_order_relaxed))
+      {
+        int retval = ::WaitForSingleObject(::GetStdHandle(STD_INPUT_HANDLE), 100);
+        switch (retval)
+        {
+          case WAIT_FAILED:
+            return false;
+          case WAIT_OBJECT_0:
+            return true;
+          default:
+            break;
+        }
+      }
 #endif
 
       return true;
@@ -161,11 +203,23 @@ namespace epee
 
         std::string line;
         bool read_ok = true;
+#ifdef HAVE_READLINE
+reread:
+#endif
         if (wait_stdin_data())
         {
           if (m_run.load(std::memory_order_relaxed))
           {
+#ifdef HAVE_READLINE
+            switch (m_readline_buffer.get_line(line))
+            {
+            case rdln::empty:   goto eof;
+            case rdln::partial: goto reread;
+            case rdln::full:    break;
+            }
+#else
             std::getline(std::cin, line);
+#endif
             read_ok = !std::cin.eof() && !std::cin.fail();
           }
         }
@@ -174,13 +228,16 @@ namespace epee
           read_ok = false;
         }
         if (std::cin.eof()) {
+#ifdef HAVE_READLINE
+eof:
+#endif
           m_read_status = state_eos;
           m_response_cv.notify_one();
           break;
         }
         else
         {
-          std::unique_lock<std::mutex> lock(m_response_mutex);
+          boost::unique_lock<boost::mutex> lock(m_response_mutex);
           if (m_run.load(std::memory_order_relaxed))
           {
             m_line = std::move(line);
@@ -205,17 +262,20 @@ namespace epee
     };
 
   private:
-    std::thread m_reader_thread;
+    boost::thread m_reader_thread;
     std::atomic<bool> m_run;
+#ifdef HAVE_READLINE
+    rdln::readline_buffer m_readline_buffer;
+#endif
 
     std::string m_line;
     bool m_has_read_request;
     t_state m_read_status;
 
-    std::mutex m_request_mutex;
-    std::mutex m_response_mutex;
-    std::condition_variable m_request_cv;
-    std::condition_variable m_response_cv;
+    boost::mutex m_request_mutex;
+    boost::mutex m_response_mutex;
+    boost::condition_variable m_request_cv;
+    boost::condition_variable m_response_cv;
   };
 
 
@@ -234,13 +294,13 @@ namespace epee
     }
 
     template<class t_server, class chain_handler>
-    bool run(t_server* psrv, chain_handler ch_handler, const std::string& prompt = "#", const std::string& usage = "")
+    bool run(t_server* psrv, chain_handler ch_handler, std::function<std::string(void)> prompt, const std::string& usage = "")
     {
       return run(prompt, usage, [&](const std::string& cmd) { return ch_handler(psrv, cmd); }, [&] { psrv->send_stop_signal(); });
     }
 
     template<class chain_handler>
-    bool run(chain_handler ch_handler, const std::string& prompt = "#", const std::string& usage = "", std::function<void(void)> exit_handler = NULL)
+    bool run(chain_handler ch_handler, std::function<std::string(void)> prompt, const std::string& usage = "", std::function<void(void)> exit_handler = NULL)
     {
       return run(prompt, usage, [&](const std::string& cmd) { return ch_handler(cmd); }, exit_handler);
     }
@@ -253,20 +313,29 @@ namespace epee
 
     void print_prompt()
     {
-      if (!m_prompt.empty())
+      std::string prompt = m_prompt();
+      if (!prompt.empty())
       {
-        epee::log_space::set_console_color(epee::log_space::console_color_yellow, true);
-        std::cout << m_prompt;
-        if (' ' != m_prompt.back())
+#ifdef HAVE_READLINE
+        std::string color_prompt = "\001\033[1;33m\002" + prompt;
+        if (' ' != prompt.back())
+          color_prompt += " ";
+        color_prompt += "\001\033[0m\002";
+        m_stdin_reader.get_readline_buffer().set_prompt(color_prompt);
+#else
+        epee::set_console_color(epee::console_color_yellow, true);
+        std::cout << prompt;
+        if (' ' != prompt.back())
           std::cout << ' ';
-        epee::log_space::reset_console_color();
+        epee::reset_console_color();
         std::cout.flush();
+#endif
       }
     }
 
   private:
     template<typename t_cmd_handler>
-    bool run(const std::string& prompt, const std::string& usage, const t_cmd_handler& cmd_handler, std::function<void(void)> exit_handler)
+    bool run(std::function<std::string(void)> prompt, const std::string& usage, const t_cmd_handler& cmd_handler, std::function<void(void)> exit_handler)
     {
       bool continue_handle = true;
       m_prompt = prompt;
@@ -288,7 +357,7 @@ namespace epee
           }
           if (!get_line_ret)
           {
-            LOG_PRINT("Failed to read line.", LOG_LEVEL_0);
+            MERROR("Failed to read line.");
           }
           string_tools::trim(command);
 
@@ -307,6 +376,9 @@ namespace epee
           }
           else
           {
+#ifdef HAVE_READLINE
+            rdln::suspend_readline pause_readline;
+#endif
             std::cout << "unknown command: " << command << std::endl;
             std::cout << usage;
           }
@@ -324,7 +396,7 @@ namespace epee
   private:
     async_stdin_reader m_stdin_reader;
     std::atomic<bool> m_running = {true};
-    std::string m_prompt;
+    std::function<std::string(void)> m_prompt;
   };
 
 
@@ -387,29 +459,38 @@ namespace epee
   class command_handler {
   public:
     typedef boost::function<bool (const std::vector<std::string> &)> callback;
-    typedef std::map<std::string, std::pair<callback, std::string> > lookup;
+    typedef std::map<std::string, std::pair<callback, std::pair<std::string, std::string>>> lookup;
 
     std::string get_usage()
     {
       std::stringstream ss;
-      size_t max_command_len = 0;
-      for(auto& x:m_command_handlers)
-        if(x.first.size() > max_command_len)
-          max_command_len = x.first.size();
 
       for(auto& x:m_command_handlers)
       {
-        ss.width(max_command_len + 3);
-        ss << std::left <<  x.first << x.second.second << ENDL;
+        ss << x.second.second.first << ENDL;
       }
       return ss.str();
     }
 
-    void set_handler(const std::string& cmd, const callback& hndlr, const std::string& usage = "")
+    std::pair<std::string, std::string> get_documentation(const std::vector<std::string>& cmd)
+    {
+      if(cmd.empty())
+        return std::make_pair("", "");
+      auto it = m_command_handlers.find(cmd.front());
+      if(it == m_command_handlers.end())
+        return std::make_pair("", "");
+      return it->second.second;
+    }
+
+    void set_handler(const std::string& cmd, const callback& hndlr, const std::string& usage = "", const std::string& description = "")
     {
       lookup::mapped_type & vt = m_command_handlers[cmd];
       vt.first = hndlr;
-      vt.second = usage;
+      vt.second.first = description.empty() ? cmd : usage;
+      vt.second.second = description.empty() ? usage : description;
+#ifdef HAVE_READLINE
+      rdln::readline_buffer::add_completion(cmd);
+#endif
     }
 
     bool process_command_vec(const std::vector<std::string>& cmd)
@@ -443,11 +524,15 @@ namespace epee
     std::unique_ptr<boost::thread> m_console_thread;
     async_console_handler m_console_handler;
   public:
-    bool start_handling(const std::string& prompt, const std::string& usage_string = "", std::function<void(void)> exit_handler = NULL)
+    bool start_handling(std::function<std::string(void)> prompt, const std::string& usage_string = "", std::function<void(void)> exit_handler = NULL)
     {
       m_console_thread.reset(new boost::thread(boost::bind(&console_handlers_binder::run_handling, this, prompt, usage_string, exit_handler)));
       m_console_thread->detach();
       return true;
+    }
+    bool start_handling(const std::string &prompt, const std::string& usage_string = "", std::function<void(void)> exit_handler = NULL)
+    {
+      return start_handling([prompt](){ return prompt; }, usage_string, exit_handler);
     }
 
     void stop_handling()
@@ -455,7 +540,7 @@ namespace epee
       m_console_handler.stop();
     }
 
-    bool run_handling(const std::string& prompt, const std::string& usage_string, std::function<void(void)> exit_handler = NULL)
+    bool run_handling(std::function<std::string(void)> prompt, const std::string& usage_string, std::function<void(void)> exit_handler = NULL)
     {
       return m_console_handler.run(boost::bind(&console_handlers_binder::process_command_str, this, _1), prompt, usage_string, exit_handler);
     }

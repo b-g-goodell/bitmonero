@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -32,9 +32,9 @@
 
 #include <vector>
 
-#include "cryptonote_core/account.h"
-#include "cryptonote_core/cryptonote_basic.h"
-#include "cryptonote_core/cryptonote_format_utils.h"
+#include "cryptonote_basic/account.h"
+#include "cryptonote_basic/cryptonote_basic.h"
+#include "cryptonote_core/cryptonote_tx_utils.h"
 #include "crypto/crypto.h"
 
 template<size_t a_ring_size>
@@ -59,7 +59,7 @@ public:
         return false;
 
       txout_to_key tx_out = boost::get<txout_to_key>(m_miner_txs[i].vout[0].target);
-      output_entries.push_back(std::make_pair(i, tx_out.key));
+      output_entries.push_back(std::make_pair(i, rct::ctkey({rct::pk2rct(tx_out.key), rct::zeroCommit(m_miner_txs[i].vout[0].amount)})));
       m_public_keys[i] = tx_out.key;
       m_public_key_ptrs[i] = &m_public_keys[i];
     }
@@ -72,6 +72,8 @@ public:
     source_entry.real_output_in_tx_index = 0;
     source_entry.outputs.swap(output_entries);
     source_entry.real_output = real_source_idx;
+    source_entry.mask = rct::identity();
+    source_entry.rct = false;
 
     m_sources.push_back(source_entry);
 

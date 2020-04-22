@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 //
 // All rights reserved.
 //
@@ -31,14 +31,12 @@
 #include <boost/iostreams/stream_buffer.hpp>
 #include <boost/iostreams/stream.hpp>
 #include <boost/iostreams/device/back_inserter.hpp>
-
 #include <boost/iostreams/filtering_streambuf.hpp>
+#include <boost/filesystem/path.hpp>
+#include <boost/filesystem/operations.hpp>
 
-#include "cryptonote_core/cryptonote_basic.h"
-#include "cryptonote_core/blockchain_storage.h"
+#include "cryptonote_basic/cryptonote_basic.h"
 #include "cryptonote_core/blockchain.h"
-#include "blockchain_db/blockchain_db.h"
-#include "blockchain_db/lmdb/db_lmdb.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -59,24 +57,17 @@ class BootstrapFile
 {
 public:
 
+  uint64_t count_bytes(std::ifstream& import_file, uint64_t blocks, uint64_t& h, bool& quit);
+  uint64_t count_blocks(const std::string& dir_path, std::streampos& start_pos, uint64_t& seek_height);
   uint64_t count_blocks(const std::string& dir_path);
   uint64_t seek_to_first_chunk(std::ifstream& import_file);
 
-#if SOURCE_DB == DB_MEMORY
-  bool store_blockchain_raw(cryptonote::blockchain_storage* cs, cryptonote::tx_memory_pool* txp,
-      boost::filesystem::path& output_file, uint64_t use_block_height=0);
-#else
   bool store_blockchain_raw(cryptonote::Blockchain* cs, cryptonote::tx_memory_pool* txp,
       boost::filesystem::path& output_file, uint64_t use_block_height=0);
-#endif
 
 protected:
 
-#if SOURCE_DB == DB_MEMORY
-  blockchain_storage* m_blockchain_storage;
-#else
   Blockchain* m_blockchain_storage;
-#endif
 
   tx_memory_pool* m_tx_pool;
   typedef std::vector<char> buffer_type;

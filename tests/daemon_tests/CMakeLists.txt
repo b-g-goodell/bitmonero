@@ -1,4 +1,4 @@
-# Copyright (c) 2014-2015, The Monero Project
+# Copyright (c) 2014-2018, The Monero Project
 #
 # All rights reserved.
 #
@@ -35,15 +35,14 @@ add_executable(transfers
   ${transfers_sources}
   ${transfers_headers})
 target_link_libraries(transfers
-  LINK_PRIVATE
+  PRIVATE
     useragent
     rpc
     cryptonote_core
-    crypto
+    cncrypto
     common
     epee
-    ${GTEST_MAIN_LIBRARIES}
-    ${Boost_LIBRARIES})
+    ${GTEST_LIBRARIES})
 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/test_transfers")
 add_custom_target(test_transfers

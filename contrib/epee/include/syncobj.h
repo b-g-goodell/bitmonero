@@ -30,18 +30,23 @@
 #ifndef __WINH_OBJ_H__
 #define __WINH_OBJ_H__
 
-#include <condition_variable>
-#include <mutex>
+#include <boost/chrono/duration.hpp>
 #include <boost/thread/locks.hpp>
 #include <boost/thread/mutex.hpp>
 #include <boost/thread/recursive_mutex.hpp>
-#include <thread>
-#include <chrono>
+#include <boost/thread/v2/thread.hpp>
 
 namespace epee
 {
 
-  extern unsigned int g_test_dbg_lock_sleep;
+  namespace debug
+  {
+    inline unsigned int &g_test_dbg_lock_sleep()
+    {
+      static unsigned int value = 0;
+      return value;
+    }
+  }
   
   struct simple_event
   {
@@ -51,22 +56,22 @@ namespace epee
 
     void raise()
     {
-      std::unique_lock<std::mutex> lock(m_mx);
+      boost::unique_lock<boost::mutex> lock(m_mx);
       m_rised = true;
       m_cond_var.notify_one();
     }
 
     void wait()
     {
-      std::unique_lock<std::mutex> lock(m_mx);
+      boost::unique_lock<boost::mutex> lock(m_mx);
       while (!m_rised) 
         m_cond_var.wait(lock);
       m_rised = false;
     }
 
   private:
-    std::mutex m_mx;
-    std::condition_variable m_cond_var;
+    boost::mutex m_mx;
+    boost::condition_variable m_cond_var;
     bool m_rised;
   };
 
@@ -219,10 +224,10 @@ namespace epee
 #define  SHARED_CRITICAL_REGION_BEGIN(x) { shared_guard   critical_region_var(x)
 #define  EXCLUSIVE_CRITICAL_REGION_BEGIN(x) { exclusive_guard   critical_region_var(x)
 
-#define  CRITICAL_REGION_LOCAL(x) {std::this_thread::sleep_for(std::chrono::milliseconds(epee::g_test_dbg_lock_sleep));}   epee::critical_region_t<decltype(x)>   critical_region_var(x)
-#define  CRITICAL_REGION_BEGIN(x) { std::this_thread::sleep_for(std::chrono::milliseconds(epee::g_test_dbg_lock_sleep)); epee::critical_region_t<decltype(x)>   critical_region_var(x)
-#define  CRITICAL_REGION_LOCAL1(x) {std::this_thread::sleep_for(std::chrono::milliseconds(epee::g_test_dbg_lock_sleep));} epee::critical_region_t<decltype(x)>   critical_region_var1(x)
-#define  CRITICAL_REGION_BEGIN1(x) {  std::this_thread::sleep_for(std::chrono::milliseconds(epee::g_test_dbg_lock_sleep)); epee::critical_region_t<decltype(x)>   critical_region_var1(x)
+#define  CRITICAL_REGION_LOCAL(x) {boost::this_thread::sleep_for(boost::chrono::milliseconds(epee::debug::g_test_dbg_lock_sleep()));}   epee::critical_region_t<decltype(x)>   critical_region_var(x)
+#define  CRITICAL_REGION_BEGIN(x) { boost::this_thread::sleep_for(boost::chrono::milliseconds(epee::debug::g_test_dbg_lock_sleep())); epee::critical_region_t<decltype(x)>   critical_region_var(x)
+#define  CRITICAL_REGION_LOCAL1(x) {boost::this_thread::sleep_for(boost::chrono::milliseconds(epee::debug::g_test_dbg_lock_sleep()));} epee::critical_region_t<decltype(x)>   critical_region_var1(x)
+#define  CRITICAL_REGION_BEGIN1(x) {  boost::this_thread::sleep_for(boost::chrono::milliseconds(epee::debug::g_test_dbg_lock_sleep())); epee::critical_region_t<decltype(x)>   critical_region_var1(x)
 
 #define  CRITICAL_REGION_END() }
 

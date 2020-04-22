@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -56,7 +56,7 @@ namespace windows {
   private:
     SERVICE_STATUS_HANDLE m_status_handle{nullptr};
     SERVICE_STATUS m_status{};
-    std::mutex m_lock{};
+    boost::mutex m_lock{};
     std::string m_name;
     T_handler m_handler;
 

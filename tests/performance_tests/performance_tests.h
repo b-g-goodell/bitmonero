@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -34,6 +34,7 @@
 #include <stdint.h>
 
 #include <boost/chrono.hpp>
+#include <boost/regex.hpp>
 
 class performance_timer
 {
@@ -95,10 +96,10 @@ public:
 
   int elapsed_time() const { return m_elapsed; }
 
-  int time_per_call() const
+  int time_per_call(int scale = 1) const
   {
     static_assert(0 < T::loop_count, "T::loop_count must be greater than 0");
-    return m_elapsed / T::loop_count;
+    return m_elapsed * scale / T::loop_count;
   }
 
 private:
@@ -122,15 +123,29 @@ private:
 };
 
 template <typename T>
-void run_test(const char* test_name)
+void run_test(const std::string &filter, const char* test_name)
 {
+  boost::smatch match;
+  if (!filter.empty() && !boost::regex_match(std::string(test_name), match, boost::regex(filter)))
+    return;
+
   test_runner<T> runner;
   if (runner.run())
   {
     std::cout << test_name << " - OK:\n";
     std::cout << "  loop count:    " << T::loop_count << '\n';
     std::cout << "  elapsed:       " << runner.elapsed_time() << " ms\n";
-    std::cout << "  time per call: " << runner.time_per_call() << " ms/call\n" << std::endl;
+    const char *unit = "ms";
+    int time_per_call = runner.time_per_call();
+    if (time_per_call < 30000) {
+     time_per_call = runner.time_per_call(1000);
+#ifdef _WIN32
+     unit = "\xb5s";
+#else
+     unit = "µs";
+#endif
+    }
+    std::cout << "  time per call: " << time_per_call << " " << unit << "/call\n" << std::endl;
   }
   else
   {
@@ -139,6 +154,7 @@ void run_test(const char* test_name)
 }
 
 #define QUOTEME(x) #x
-#define TEST_PERFORMANCE0(test_class)         run_test< test_class >(QUOTEME(test_class))
-#define TEST_PERFORMANCE1(test_class, a0)     run_test< test_class<a0> >(QUOTEME(test_class<a0>))
-#define TEST_PERFORMANCE2(test_class, a0, a1) run_test< test_class<a0, a1> >(QUOTEME(test_class) "<" QUOTEME(a0) ", " QUOTEME(a1) ">")
+#define TEST_PERFORMANCE0(filter, test_class)         run_test< test_class >(filter, QUOTEME(test_class))
+#define TEST_PERFORMANCE1(filter, test_class, a0)     run_test< test_class<a0> >(filter, QUOTEME(test_class<a0>))
+#define TEST_PERFORMANCE2(filter, test_class, a0, a1) run_test< test_class<a0, a1> >(filter, QUOTEME(test_class) "<" QUOTEME(a0) ", " QUOTEME(a1) ">")
+#define TEST_PERFORMANCE3(filter, test_class, a0, a1, a2) run_test< test_class<a0, a1, a2> >(filter, QUOTEME(test_class) "<" QUOTEME(a0) ", " QUOTEME(a1) ", " QUOTEME(a2) ">")

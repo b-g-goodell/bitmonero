@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -35,12 +35,13 @@
 
 #include "gtest/gtest.h"
 
+#include "string_tools.h"
 #include "blockchain_db/blockchain_db.h"
 #include "blockchain_db/lmdb/db_lmdb.h"
 #ifdef BERKELEY_DB
 #include "blockchain_db/berkeleydb/db_bdb.h"
 #endif
-#include "cryptonote_core/cryptonote_format_utils.h"
+#include "cryptonote_basic/cryptonote_format_utils.h"
 
 using namespace cryptonote;
 using epee::string_tools::pod_to_hex;
@@ -155,7 +156,7 @@ template <typename T>
 class BlockchainDBTest : public testing::Test
 {
 protected:
-  BlockchainDBTest() : m_db(new T())
+  BlockchainDBTest() : m_db(new T()), m_hardfork(*m_db, 1, 0)
   {
     for (auto& i : t_blocks)
     {
@@ -184,10 +185,17 @@ protected:
   }
 
   BlockchainDB* m_db;
+  HardFork m_hardfork;
   std::string m_prefix;
   std::vector<block> m_blocks;
   std::vector<std::vector<transaction> > m_txs;
   std::vector<std::string> m_filenames;
+
+  void init_hard_fork()
+  {
+    m_hardfork.init();
+    m_db->set_hard_fork(&m_hardfork);
+  }
 
   void get_filenames()
   {
@@ -235,28 +243,33 @@ TYPED_TEST_CASE(BlockchainDBTest, implementations);
 
 TYPED_TEST(BlockchainDBTest, OpenAndClose)
 {
-  std::string fname(tmpnam(NULL));
+  boost::filesystem::path tempPath = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
+  std::string dirPath = tempPath.string();
 
-  this->set_prefix(fname);
+  this->set_prefix(dirPath);
 
   // make sure open does not throw
-  ASSERT_NO_THROW(this->m_db->open(fname));
+  ASSERT_NO_THROW(this->m_db->open(dirPath));
   this->get_filenames();
 
   // make sure open when already open DOES throw
-  ASSERT_THROW(this->m_db->open(fname), DB_OPEN_FAILURE);
+  ASSERT_THROW(this->m_db->open(dirPath), DB_OPEN_FAILURE);
 
   ASSERT_NO_THROW(this->m_db->close());
 }
 
 TYPED_TEST(BlockchainDBTest, AddBlock)
 {
-  std::string fname(tmpnam(NULL));
-  this->set_prefix(fname);
+
+  boost::filesystem::path tempPath = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
+  std::string dirPath = tempPath.string();
+
+  this->set_prefix(dirPath);
 
   // make sure open does not throw
-  ASSERT_NO_THROW(this->m_db->open(fname));
+  ASSERT_NO_THROW(this->m_db->open(dirPath));
   this->get_filenames();
+  this->init_hard_fork();
 
   // adding a block with no parent in the blockchain should throw.
   // note: this shouldn't be possible, but is a good (and cheap) failsafe.
@@ -280,7 +293,7 @@ TYPED_TEST(BlockchainDBTest, AddBlock)
   ASSERT_TRUE(compare_blocks(this->m_blocks[0], b));
 
   // assert that we can't add the same block twice
-  ASSERT_THROW(this->m_db->add_block(this->m_blocks[0], t_sizes[0], t_diffs[0], t_coins[0], this->m_txs[0]), BLOCK_EXISTS);
+  ASSERT_THROW(this->m_db->add_block(this->m_blocks[0], t_sizes[0], t_diffs[0], t_coins[0], this->m_txs[0]), TX_EXISTS);
 
   for (auto& h : this->m_blocks[0].tx_hashes)
   {
@@ -294,12 +307,15 @@ TYPED_TEST(BlockchainDBTest, AddBlock)
 
 TYPED_TEST(BlockchainDBTest, RetrieveBlockData)
 {
-  std::string fname(tmpnam(NULL));
-  this->set_prefix(fname);
+  boost::filesystem::path tempPath = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path();
+  std::string dirPath = tempPath.string();
+
+  this->set_prefix(dirPath);
 
   // make sure open does not throw
-  ASSERT_NO_THROW(this->m_db->open(fname));
+  ASSERT_NO_THROW(this->m_db->open(dirPath));
   this->get_filenames();
+  this->init_hard_fork();
 
   ASSERT_NO_THROW(this->m_db->add_block(this->m_blocks[0], t_sizes[0], t_diffs[0], t_coins[0], this->m_txs[0]));
 

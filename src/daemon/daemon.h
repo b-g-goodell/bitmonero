@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -29,9 +29,12 @@
 #pragma once
 #include <boost/program_options.hpp>
 
+#undef MONERO_DEFAULT_LOG_CATEGORY
+#define MONERO_DEFAULT_LOG_CATEGORY "daemon"
+
 namespace daemonize {
 
-class t_internals;
+struct t_internals;
 
 class t_daemon final {
 public:
@@ -40,6 +43,8 @@ private:
   void stop_p2p();
 private:
   std::unique_ptr<t_internals> mp_internals;
+  std::string zmq_rpc_bind_address;
+  std::string zmq_rpc_bind_port;
 public:
   t_daemon(
       boost::program_options::variables_map const & vm

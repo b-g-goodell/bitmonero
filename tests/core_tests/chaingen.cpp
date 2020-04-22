@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -37,16 +37,17 @@
 #include "console_handler.h"
 
 #include "p2p/net_node.h"
-#include "cryptonote_core/cryptonote_basic.h"
-#include "cryptonote_core/cryptonote_basic_impl.h"
-#include "cryptonote_core/cryptonote_format_utils.h"
-#include "cryptonote_core/miner.h"
+#include "cryptonote_basic/cryptonote_basic.h"
+#include "cryptonote_basic/cryptonote_basic_impl.h"
+#include "cryptonote_basic/cryptonote_format_utils.h"
+#include "cryptonote_basic/miner.h"
 
 #include "chaingen.h"
-
+#include "device/device.hpp"
 using namespace std;
 
 using namespace epee;
+using namespace crypto;
 using namespace cryptonote;
 
 
@@ -94,11 +95,11 @@ uint64_t test_generator::get_already_generated_coins(const cryptonote::block& bl
   return get_already_generated_coins(blk_hash);
 }
 
-void test_generator::add_block(const cryptonote::block& blk, size_t tsx_size, std::vector<size_t>& block_sizes, uint64_t already_generated_coins)
+void test_generator::add_block(const cryptonote::block& blk, size_t tsx_size, std::vector<size_t>& block_sizes, uint64_t already_generated_coins, uint8_t hf_version)
 {
   const size_t block_size = tsx_size + get_object_blobsize(blk.miner_tx);
   uint64_t block_reward;
-  get_block_reward(misc_utils::median(block_sizes), block_size, already_generated_coins, block_reward, 1);
+  get_block_reward(misc_utils::median(block_sizes), block_size, already_generated_coins, block_reward, hf_version);
   m_blocks_info[get_block_hash(blk)] = block_info(blk.prev_id, already_generated_coins + block_reward, block_size);
 }
 
@@ -215,13 +216,15 @@ bool test_generator::construct_block_manually(block& blk, const block& prev_bloc
                                               const crypto::hash& prev_id/* = crypto::hash()*/, const difficulty_type& diffic/* = 1*/,
                                               const transaction& miner_tx/* = transaction()*/,
                                               const std::vector<crypto::hash>& tx_hashes/* = std::vector<crypto::hash>()*/,
-                                              size_t txs_sizes/* = 0*/)
+                                              size_t txs_sizes/* = 0*/, size_t max_outs/* = 0*/, uint8_t hf_version/* = 1*/)
 {
   blk.major_version = actual_params & bf_major_ver ? major_ver : CURRENT_BLOCK_MAJOR_VERSION;
   blk.minor_version = actual_params & bf_minor_ver ? minor_ver : CURRENT_BLOCK_MINOR_VERSION;
   blk.timestamp     = actual_params & bf_timestamp ? timestamp : prev_block.timestamp + DIFFICULTY_BLOCKS_ESTIMATE_TIMESPAN; // Keep difficulty unchanged
   blk.prev_id       = actual_params & bf_prev_id   ? prev_id   : get_block_hash(prev_block);
   blk.tx_hashes     = actual_params & bf_tx_hashes ? tx_hashes : std::vector<crypto::hash>();
+  max_outs          = actual_params & bf_max_outs ? max_outs : 9999;
+  hf_version        = actual_params & bf_hf_version ? hf_version : 1;
 
   size_t height = get_block_height(prev_block) + 1;
   uint64_t already_generated_coins = get_already_generated_coins(prev_block);
@@ -235,7 +238,7 @@ bool test_generator::construct_block_manually(block& blk, const block& prev_bloc
   {
     size_t current_block_size = txs_sizes + get_object_blobsize(blk.miner_tx);
     // TODO: This will work, until size of constructed block is less then CRYPTONOTE_BLOCK_GRANTED_FULL_REWARD_ZONE
-    if (!construct_miner_tx(height, misc_utils::median(block_sizes), already_generated_coins, current_block_size, 0, miner_acc.get_keys().m_account_address, blk.miner_tx, blobdata(), 1))
+    if (!construct_miner_tx(height, misc_utils::median(block_sizes), already_generated_coins, current_block_size, 0, miner_acc.get_keys().m_account_address, blk.miner_tx, blobdata(), max_outs, hf_version))
       return false;
   }
 
@@ -244,7 +247,7 @@ bool test_generator::construct_block_manually(block& blk, const block& prev_bloc
   difficulty_type a_diffic = actual_params & bf_diffic ? diffic : get_test_difficulty();
   fill_nonce(blk, a_diffic, height);
 
-  add_block(blk, txs_sizes, block_sizes, already_generated_coins);
+  add_block(blk, txs_sizes, block_sizes, already_generated_coins, hf_version);
 
   return true;
 }
@@ -342,7 +345,7 @@ bool init_output_indices(map_output_idx_t& outs, std::map<uint64_t, std::vector<
                     size_t tx_global_idx = outs[out.amount].size() - 1;
                     outs[out.amount][tx_global_idx].idx = tx_global_idx;
                     // Is out to me?
-                    if (is_out_to_acc(from.get_keys(), boost::get<txout_to_key>(out.target), get_tx_pub_key_from_extra(tx), j)) {
+                    if (is_out_to_acc(from.get_keys(), boost::get<txout_to_key>(out.target), get_tx_pub_key_from_extra(tx), get_additional_tx_pub_keys_from_extra(tx), j)) {
                         outs_mine[out.amount].push_back(tx_global_idx);
                     }
                 }
@@ -362,7 +365,10 @@ bool init_spent_output_indices(map_output_idx_t& outs, map_output_t& outs_mine, 
             // construct key image for this output
             crypto::key_image img;
             keypair in_ephemeral;
-            generate_key_image_helper(from.get_keys(), get_tx_pub_key_from_extra(*oi.p_tx), oi.out_no, in_ephemeral, img);
+            crypto::public_key out_key = boost::get<txout_to_key>(oi.out).key;
+            std::unordered_map<crypto::public_key, cryptonote::subaddress_index> subaddresses;
+            subaddresses[from.get_keys().m_account_address.m_spend_public_key] = {0,0};
+            generate_key_image_helper(from.get_keys(), subaddresses, out_key, get_tx_pub_key_from_extra(*oi.p_tx), get_additional_tx_pub_keys_from_extra(*oi.p_tx), oi.out_no, in_ephemeral, img, hw::get_device(("default")));
 
             // lookup for this key image in the events vector
             BOOST_FOREACH(auto& tx_pair, mtx) {
@@ -411,7 +417,7 @@ bool fill_output_entries(std::vector<output_index>& out_indices, size_t sender_o
     if (append)
     {
       const txout_to_key& otk = boost::get<txout_to_key>(oi.out);
-      output_entries.push_back(tx_source_entry::output_entry(oi.idx, otk.key));
+      output_entries.push_back(tx_source_entry::output_entry(oi.idx, rct::ctkey({rct::pk2rct(otk.key), rct::identity()})));
     }
   }
 
@@ -456,6 +462,7 @@ bool fill_tx_sources(std::vector<tx_source_entry>& sources, const std::vector<te
               continue;
 
             ts.real_output = realOutput;
+            ts.rct = false;
 
             sources.push_back(ts);
 
@@ -514,7 +521,7 @@ bool construct_miner_tx_manually(size_t height, uint64_t already_generated_coins
                                  keypair* p_txkey/* = 0*/)
 {
   keypair txkey;
-  txkey = keypair::generate();
+  txkey = keypair::generate(hw::get_device("default"));
   add_tx_pub_key_to_extra(tx, txkey.pub);
 
   if (0 != p_txkey)
@@ -543,7 +550,7 @@ bool construct_miner_tx_manually(size_t height, uint64_t already_generated_coins
   out.target = txout_to_key(out_eph_public_key);
   tx.vout.push_back(out);
 
-  tx.version = CURRENT_TRANSACTION_VERSION;
+  tx.version = 1;
   tx.unlock_time = height + CRYPTONOTE_MINED_MONEY_UNLOCK_WINDOW;
 
   return true;
@@ -557,7 +564,7 @@ bool construct_tx_to_key(const std::vector<test_event_entry>& events, cryptonote
   vector<tx_destination_entry> destinations;
   fill_tx_sources_and_destinations(events, blk_head, from, to, amount, fee, nmix, sources, destinations);
 
-  return construct_tx(from.get_keys(), sources, destinations, std::vector<uint8_t>(), tx, 0);
+  return construct_tx(from.get_keys(), sources, destinations, from.get_keys().m_account_address, std::vector<uint8_t>(), tx, 0);
 }
 
 transaction construct_tx_with_fee(std::vector<test_event_entry>& events, const block& blk_head,

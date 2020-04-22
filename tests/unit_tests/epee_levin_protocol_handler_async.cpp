@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -28,8 +28,8 @@
 // 
 // Parts of this file are originally copyright (c) 2012-2013 The Cryptonote developers
 
-#include <mutex>
-#include <thread>
+#include <boost/thread/mutex.hpp>
+#include <boost/thread/thread.hpp>
 
 #include "gtest/gtest.h"
 
@@ -59,7 +59,7 @@ namespace
     virtual int invoke(int command, const std::string& in_buff, std::string& buff_out, test_levin_connection_context& context)
     {
       m_invoke_counter.inc();
-      std::unique_lock<std::mutex> lock(m_mutex);
+      boost::unique_lock<boost::mutex> lock(m_mutex);
       m_last_command = command;
       m_last_in_buf = in_buff;
       buff_out = m_invoke_out_buf;
@@ -69,7 +69,7 @@ namespace
     virtual int notify(int command, const std::string& in_buff, test_levin_connection_context& context)
     {
       m_notify_counter.inc();
-      std::unique_lock<std::mutex> lock(m_mutex);
+      boost::unique_lock<boost::mutex> lock(m_mutex);
       m_last_command = command;
       m_last_in_buf = in_buff;
       return m_return_code;
@@ -115,7 +115,7 @@ namespace
     unit_test::call_counter m_new_connection_counter;
     unit_test::call_counter m_close_connection_counter;
 
-    std::mutex m_mutex;
+    boost::mutex m_mutex;
 
     int m_return_code;
     std::string m_invoke_out_buf;
@@ -144,7 +144,7 @@ namespace
     {
       //std::cout << "test_connection::do_send()" << std::endl;
       m_send_counter.inc();
-      std::unique_lock<std::mutex> lock(m_mutex);
+      boost::unique_lock<boost::mutex> lock(m_mutex);
       m_last_send_data.append(reinterpret_cast<const char*>(ptr), cb);
       return m_send_return;
     }
@@ -159,7 +159,7 @@ namespace
     size_t send_counter() const { return m_send_counter.get(); }
 
     const std::string& last_send_data() const { return m_last_send_data; }
-    void reset_last_send_data() { std::unique_lock<std::mutex> lock(m_mutex); m_last_send_data.clear(); }
+    void reset_last_send_data() { boost::unique_lock<boost::mutex> lock(m_mutex); m_last_send_data.clear(); }
 
     bool send_return() const { return m_send_return; }
     void send_return(bool v) { m_send_return = v; }
@@ -172,7 +172,7 @@ namespace
     test_levin_connection_context m_context;
 
     unit_test::call_counter m_send_counter;
-    std::mutex m_mutex;
+    boost::mutex m_mutex;
 
     std::string m_last_send_data;
 
@@ -187,9 +187,11 @@ namespace
 
     typedef std::unique_ptr<test_connection> test_connection_ptr;
 
-    async_protocol_handler_test()
+    async_protocol_handler_test():
+      m_pcommands_handler(new test_levin_commands_handler()),
+      m_commands_handler(*m_pcommands_handler)
     {
-      m_handler_config.m_pcommands_handler = &m_commands_handler;
+      m_handler_config.set_handler(m_pcommands_handler, [](epee::levin::levin_commands_handler<test_levin_connection_context> *handler) { delete handler; });
       m_handler_config.m_invoke_timeout = invoke_timeout;
       m_handler_config.m_max_packet_size = max_packet_size;
     }
@@ -212,7 +214,7 @@ namespace
   protected:
     boost::asio::io_service m_io_service;
     test_levin_protocol_handler_config m_handler_config;
-    test_levin_commands_handler m_commands_handler;
+    test_levin_commands_handler *m_pcommands_handler, &m_commands_handler;
   };
 
   class positive_test_connection_to_levin_protocol_handler_calls : public async_protocol_handler_test
@@ -242,6 +244,7 @@ namespace
       m_req_head.m_cb = m_in_data.size();
       m_req_head.m_have_to_return_data = true;
       m_req_head.m_command = expected_command;
+      m_req_head.m_return_code = LEVIN_OK;
       m_req_head.m_flags = LEVIN_PACKET_REQUEST;
       m_req_head.m_protocol_version = LEVIN_PROTOCOL_VER_1;
 
@@ -304,14 +307,14 @@ TEST_F(positive_test_connection_to_levin_protocol_handler_calls, concurent_handl
     }
   };
 
-  const size_t thread_count = std::thread::hardware_concurrency();
-  std::vector<std::thread> threads(thread_count);
-  for (std::thread& th : threads)
+  const size_t thread_count = boost::thread::hardware_concurrency();
+  std::vector<boost::thread> threads(thread_count);
+  for (boost::thread& th : threads)
   {
-    th = std::thread(create_and_destroy_connections);
+    th = boost::thread(create_and_destroy_connections);
   }
 
-  for (std::thread& th : threads)
+  for (boost::thread& th : threads)
   {
     th.join();
   }
@@ -375,7 +378,7 @@ TEST_F(positive_test_connection_to_levin_protocol_handler_calls, handler_process
   ASSERT_EQ(expected_out_data.size(), resp_head.m_cb);
   ASSERT_FALSE(resp_head.m_have_to_return_data);
   ASSERT_EQ(LEVIN_PROTOCOL_VER_1, resp_head.m_protocol_version);
-  ASSERT_TRUE(0 != (resp_head.m_flags | LEVIN_PACKET_RESPONSE));
+  ASSERT_TRUE(0 != (resp_head.m_flags & LEVIN_PACKET_RESPONSE));
 }
 
 TEST_F(positive_test_connection_to_levin_protocol_handler_calls, handler_processes_handle_read_as_notify)

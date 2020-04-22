@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -32,4 +32,4 @@
 
 #include <stddef.h>
 
-void generate_random_bytes(size_t n, void *result);
+void generate_random_bytes_not_thread_safe(size_t n, void *result);

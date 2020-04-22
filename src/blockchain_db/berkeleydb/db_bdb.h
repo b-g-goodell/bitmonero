@@ -1,4 +1,4 @@
-// Copyright (c) 2014, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without modification, are
@@ -28,9 +28,10 @@
 #include <db_cxx.h>
 
 #include "blockchain_db/blockchain_db.h"
-#include "cryptonote_protocol/blobdatatype.h" // for type blobdata
+#include "cryptonote_basic/blobdatatype.h" // for type blobdata
 
 #include <unordered_map>
+#include <condition_variable>
 
 // ND: Enables multi-threaded bulk reads for when getting indices.
 //     TODO: Disabled for now, as it doesn't seem to provide noticeable improvements (??. Reason: TBD.
@@ -129,7 +130,7 @@ public:
 
     T acquire_buffer()
     {
-        std::unique_lock<std::mutex> lock(m_lock);
+        boost::unique_lock<boost::mutex> lock(m_lock);
         m_cv.wait(lock, [&]{ return m_count > 0; });
 
         --m_count;
@@ -153,7 +154,7 @@ public:
 
     void release_buffer(T buffer)
     {
-        std::unique_lock<std::mutex> lock(m_lock);
+        boost::unique_lock<boost::mutex> lock(m_lock);
 
         assert(buffer != nullptr);
         auto it = m_buffer_map.find(buffer);
@@ -195,10 +196,10 @@ private:
     std::vector<T> m_buffers;
     std::unordered_map<T, size_t> m_buffer_map;
 
-    std::condition_variable m_cv;
+    boost::condition_variable m_cv;
     std::vector<bool> m_open_slot;
     size_t m_count;
-    std::mutex m_lock;
+    boost::mutex m_lock;
 
     size_t m_buffer_count;
 };
@@ -249,7 +250,7 @@ public:
 
   virtual void unlock();
 
-  virtual bool block_exists(const crypto::hash& h) const;
+  virtual bool block_exists(const crypto::hash& h, uint64_t *height = NULL) const;
 
   virtual block get_block(const crypto::hash& h) const;
 
@@ -323,10 +324,14 @@ public:
                             );
 
   virtual void set_batch_transactions(bool batch_transactions);
-  virtual void batch_start(uint64_t batch_num_blocks=0);
+  virtual bool batch_start(uint64_t batch_num_blocks=0);
   virtual void batch_commit();
   virtual void batch_stop();
   virtual void batch_abort();
+
+  virtual void block_txn_start(bool readonly);
+  virtual void block_txn_stop();
+  virtual void block_txn_abort();
 
   virtual void pop_block(block& blk, std::vector<transaction>& txs);
 
@@ -335,6 +340,15 @@ public:
 #else
   virtual bool can_thread_bulk_indices() const { return false; }
 #endif
+
+  /**
+   * @brief return a histogram of outputs on the blockchain
+   *
+   * @param amounts optional set of amounts to lookup
+   *
+   * @return a set of amount/instances
+   */
+  std::map<uint64_t, uint64_t> get_output_histogram(const std::vector<uint64_t> &amounts) const;
 
 private:
   virtual void add_block( const block& blk
@@ -350,7 +364,7 @@ private:
 
   virtual void remove_transaction_data(const crypto::hash& tx_hash, const transaction& tx);
 
-  virtual void add_output(const crypto::hash& tx_hash, const tx_out& tx_output, const uint64_t& local_index, const uint64_t unlock_time);
+  virtual void add_output(const crypto::hash& tx_hash, const tx_out& tx_output, const uint64_t& local_index, const uint64_t unlock_time, const rct::key *commitment);
 
   virtual void remove_output(const tx_out& tx_output);
 
@@ -371,10 +385,10 @@ private:
   virtual bool for_all_outputs(std::function<bool(uint64_t amount, const crypto::hash &tx_hash, size_t tx_idx)> f) const;
 
   // Hard fork related storage
-  virtual void set_hard_fork_starting_height(uint8_t version, uint64_t height);
-  virtual uint64_t get_hard_fork_starting_height(uint8_t version) const;
   virtual void set_hard_fork_version(uint64_t height, uint8_t version);
   virtual uint8_t get_hard_fork_version(uint64_t height) const;
+  virtual void check_hard_fork_info();
+  virtual void drop_hard_fork_info();
 
   /**
    * @brief convert a tx output to a blob for storage
@@ -405,6 +419,9 @@ private:
   uint64_t get_output_global_index(const uint64_t& amount, const uint64_t& index);
   void checkpoint_worker() const;
   void check_open() const;
+
+  virtual bool is_read_only() const;
+
   //
   // fix up anything that may be wrong due to past bugs
   virtual void fixup();

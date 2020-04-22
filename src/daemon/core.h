@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -28,11 +28,12 @@
 
 #pragma once
 
-#include "cryptonote_core/checkpoints_create.h"
 #include "cryptonote_core/cryptonote_core.h"
 #include "cryptonote_protocol/cryptonote_protocol_handler.h"
 #include "misc_log_ex.h"
-#include "daemon/command_line_args.h"
+
+#undef MONERO_DEFAULT_LOG_CATEGORY
+#define MONERO_DEFAULT_LOG_CATEGORY "daemon"
 
 namespace daemonize
 {
@@ -43,7 +44,6 @@ public:
   static void init_options(boost::program_options::options_description & option_spec)
   {
     cryptonote::core::init_options(option_spec);
-    cryptonote::miner::init_options(option_spec);
   }
 private:
   typedef cryptonote::t_cryptonote_protocol_handler<cryptonote::core> t_protocol_raw;
@@ -66,15 +66,31 @@ public:
     m_core.set_cryptonote_protocol(&protocol);
   }
 
-  void run()
+  std::string get_config_subdir() const
+  {
+    bool testnet = command_line::get_arg(m_vm_HACK, cryptonote::arg_testnet_on);
+    bool stagenet = command_line::get_arg(m_vm_HACK, cryptonote::arg_stagenet_on);
+    bool mainnet = !testnet && !stagenet;
+    std::string port = command_line::get_arg(m_vm_HACK, nodetool::arg_p2p_bind_port);
+    if ((mainnet && port != std::to_string(::config::P2P_DEFAULT_PORT))
+        || (testnet && port != std::to_string(::config::testnet::P2P_DEFAULT_PORT))
+        || (stagenet && port != std::to_string(::config::stagenet::P2P_DEFAULT_PORT))) {
+      return port;
+    }
+    return std::string();
+  }
+
+  bool run()
   {
     //initialize core here
-    LOG_PRINT_L0("Initializing core...");
-    if (!m_core.init(m_vm_HACK))
+    MGINFO("Initializing core...");
+    std::string config_subdir = get_config_subdir();
+    if (!m_core.init(m_vm_HACK, config_subdir.empty() ? NULL : config_subdir.c_str()))
     {
-      throw std::runtime_error("Failed to initialize core");
+      return false;
     }
-    LOG_PRINT_L0("Core initialized OK");
+    MGINFO("Core initialized OK");
+    return true;
   }
 
   cryptonote::core & get()
@@ -84,12 +100,12 @@ public:
 
   ~t_core()
   {
-    LOG_PRINT_L0("Deinitializing core...");
+    MGINFO("Deinitializing core...");
     try {
       m_core.deinit();
       m_core.set_cryptonote_protocol(nullptr);
     } catch (...) {
-      LOG_PRINT_L0("Failed to deinitialize core...");
+      MERROR("Failed to deinitialize core...");
     }
   }
 };

@@ -1,4 +1,4 @@
-// Copyright (c) 2014-2015, The Monero Project
+// Copyright (c) 2014-2018, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -30,9 +30,9 @@
 
 #pragma once
 
-#include "cryptonote_core/account.h"
-#include "cryptonote_core/cryptonote_basic.h"
-#include "cryptonote_core/cryptonote_format_utils.h"
+#include "cryptonote_basic/account.h"
+#include "cryptonote_basic/cryptonote_basic.h"
+#include "cryptonote_core/cryptonote_tx_utils.h"
 
 class single_tx_test_base
 {
@@ -47,6 +47,7 @@ public:
       return false;
 
     m_tx_pub_key = get_tx_pub_key_from_extra(m_tx);
+    m_additional_tx_pub_keys = get_additional_tx_pub_keys_from_extra(m_tx);
     return true;
   }
 
@@ -54,4 +55,5 @@ protected:
   cryptonote::account_base m_bob;
   cryptonote::transaction m_tx;
   crypto::public_key m_tx_pub_key;
+  std::vector<crypto::public_key> m_additional_tx_pub_keys;
 };
